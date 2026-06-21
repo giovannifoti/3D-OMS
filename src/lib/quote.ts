@@ -272,20 +272,16 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload): void {
   document.roundedRect(margin, depositY, contentWidth, depositHeight, 2, 2, "FD");
   document.setTextColor(...COLORS.blue);
   document.setFont("helvetica", "bold");
-  document.setFontSize(8);
-  document.text("ACCONTO PER L'INIZIO DEL LAVORO", margin + 6, depositY + 10);
-  document.setTextColor(...COLORS.text);
-  document.setFont("helvetica", "normal");
   document.setFontSize(10);
   document.text(
-    `Per iniziare il lavoro deve essere versato un acconto pari al ${PAYMENT_DETAILS.depositPercent}% del totale.`,
+    `L'ordine verrà ritenuto confermato a seguito di un acconto pari al ${PAYMENT_DETAILS.depositPercent}%.`,
     margin + 6,
-    depositY + 20,
+    depositY + 13,
   );
   document.setFont("helvetica", "bold");
   document.setFontSize(18);
   document.setTextColor(...COLORS.navy);
-  document.text(formatPdfCurrency(depositAmount), margin + 6, depositY + 34);
+  document.text(formatPdfCurrency(depositAmount), margin + 6, depositY + 31);
 
   const paymentY = 113;
   const paymentHeight = 65;
@@ -318,9 +314,6 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload): void {
   document.setFontSize(11);
   document.text(PAYMENT_DETAILS.bank, valueX, firstRowY + 34);
 
-  document.setFontSize(9);
-  document.setTextColor(...COLORS.muted);
-  document.text("Il lavoro iniziera alla ricezione dell'acconto.", margin, paymentY + paymentHeight + 18);
 }
 
 function drawNotes(document: jsPDF, notes: string, requestedY: number, pageWidth: number, margin: number): void {
