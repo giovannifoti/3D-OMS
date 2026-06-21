@@ -56,6 +56,13 @@ const COLORS = {
   white: [255, 255, 255] as [number, number, number],
 };
 
+const PAYMENT_DETAILS = {
+  holder: "Intestatario non configurato",
+  iban: "IBAN non configurato",
+  bank: "Banca non configurata",
+  depositPercent: 25,
+} as const;
+
 export function openQuote(payload: QuotePayload): void {
   const document = createQuotePdfDocument(payload);
   document.save(`${safeFileName(payload.quoteNumber)}.pdf`);
@@ -192,10 +199,11 @@ function createPdf(payload: PdfPayload): jsPDF {
   });
 
   const tableEndY = getLastTableY(document);
-  const totalsHeight = payload.includeVat ? 31 : 23;
+  const totalsHeight = payload.includeVat ? 39 : 31;
   const totalsY = ensureSpace(document, tableEndY + 8, totalsHeight + 34, margin);
   drawTotals(document, payload, totalsY, pageWidth, margin);
   drawNotes(document, payload.notes, totalsY + totalsHeight + 10, pageWidth, margin);
+  drawPaymentPage(document, payload);
 
   return document;
 }
@@ -203,7 +211,7 @@ function createPdf(payload: PdfPayload): jsPDF {
 function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: number, margin: number): void {
   const width = 78;
   const x = pageWidth - margin - width;
-  const height = payload.includeVat ? 31 : 23;
+  const height = payload.includeVat ? 39 : 31;
   document.setFillColor(...COLORS.paleBlue);
   document.setDrawColor(...COLORS.border);
   document.roundedRect(x, y, width, height, 2, 2, "FD");
@@ -221,7 +229,13 @@ function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: 
     document.text(formatPdfCurrency(payload.vatAmount), x + width - 5, y + 14, { align: "right" });
   }
 
-  const totalY = payload.includeVat ? y + 24 : y + 16;
+  const shippingY = payload.includeVat ? y + 21 : y + 14;
+  document.setTextColor(...COLORS.muted);
+  document.text("Spese di spedizione", x + 5, shippingY);
+  document.setTextColor(...COLORS.text);
+  document.text("Da concordare", x + width - 5, shippingY, { align: "right" });
+
+  const totalY = shippingY + 11;
   document.setDrawColor(...COLORS.blue);
   document.line(x + 5, totalY - 5, x + width - 5, totalY - 5);
   document.setFont("helvetica", "bold");
@@ -229,6 +243,84 @@ function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: 
   document.setTextColor(...COLORS.navy);
   document.text("TOTALE", x + 5, totalY);
   document.text(formatPdfCurrency(payload.grossPrice), x + width - 5, totalY, { align: "right" });
+}
+
+function drawPaymentPage(document: jsPDF, payload: PdfPayload): void {
+  document.addPage();
+  const pageWidth = document.internal.pageSize.getWidth();
+  const margin = 18;
+  const contentWidth = pageWidth - margin * 2;
+  const depositAmount = (payload.grossPrice * PAYMENT_DETAILS.depositPercent) / 100;
+
+  document.setFillColor(...COLORS.navy);
+  document.rect(0, 0, pageWidth, 44, "F");
+  document.setTextColor(...COLORS.white);
+  document.setFont("helvetica", "bold");
+  document.setFontSize(9);
+  document.text("PAGAMENTO", margin, 16);
+  document.setFontSize(21);
+  document.text("Dettagli di pagamento", margin, 29);
+  document.setFont("helvetica", "normal");
+  document.setFontSize(9);
+  document.text(cleanPdfText(payload.quoteNumber), pageWidth - margin, 17, { align: "right" });
+  document.text(payload.date, pageWidth - margin, 23, { align: "right" });
+
+  const depositY = 56;
+  const depositHeight = 43;
+  document.setFillColor(...COLORS.paleBlue);
+  document.setDrawColor(...COLORS.border);
+  document.roundedRect(margin, depositY, contentWidth, depositHeight, 2, 2, "FD");
+  document.setTextColor(...COLORS.blue);
+  document.setFont("helvetica", "bold");
+  document.setFontSize(8);
+  document.text("ACCONTO PER L'INIZIO DEL LAVORO", margin + 6, depositY + 10);
+  document.setTextColor(...COLORS.text);
+  document.setFont("helvetica", "normal");
+  document.setFontSize(10);
+  document.text(
+    `Per iniziare il lavoro deve essere versato un acconto pari al ${PAYMENT_DETAILS.depositPercent}% del totale.`,
+    margin + 6,
+    depositY + 20,
+  );
+  document.setFont("helvetica", "bold");
+  document.setFontSize(18);
+  document.setTextColor(...COLORS.navy);
+  document.text(formatPdfCurrency(depositAmount), margin + 6, depositY + 34);
+
+  const paymentY = 113;
+  const paymentHeight = 65;
+  document.setTextColor(...COLORS.blue);
+  document.setFont("helvetica", "bold");
+  document.setFontSize(8);
+  document.text("DATI PER IL BONIFICO", margin, paymentY);
+  document.setFillColor(248, 251, 255);
+  document.setDrawColor(...COLORS.border);
+  document.roundedRect(margin, paymentY + 6, contentWidth, paymentHeight, 2, 2, "FD");
+
+  const labelX = margin + 7;
+  const valueX = margin + 42;
+  const firstRowY = paymentY + 20;
+  document.setFontSize(9);
+  document.setFont("helvetica", "bold");
+  document.setTextColor(...COLORS.muted);
+  document.text("Intestatario", labelX, firstRowY);
+  document.text("IBAN", labelX, firstRowY + 17);
+  document.text("Banca", labelX, firstRowY + 34);
+
+  document.setTextColor(...COLORS.text);
+  document.setFont("helvetica", "normal");
+  document.setFontSize(11);
+  document.text(PAYMENT_DETAILS.holder, valueX, firstRowY);
+  document.setFont("courier", "bold");
+  document.setFontSize(10.5);
+  document.text(PAYMENT_DETAILS.iban, valueX, firstRowY + 17);
+  document.setFont("helvetica", "normal");
+  document.setFontSize(11);
+  document.text(PAYMENT_DETAILS.bank, valueX, firstRowY + 34);
+
+  document.setFontSize(9);
+  document.setTextColor(...COLORS.muted);
+  document.text("Il lavoro iniziera alla ricezione dell'acconto.", margin, paymentY + paymentHeight + 18);
 }
 
 function drawNotes(document: jsPDF, notes: string, requestedY: number, pageWidth: number, margin: number): void {
