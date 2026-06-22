@@ -267,6 +267,11 @@ function App() {
     }));
   }
 
+  function patchQuoteOptions(update: Partial<Pick<PricingInputs, "color" | "finish">>) {
+    patchPricing(update);
+    setQuoteItems((previous) => previous.map((item) => ({ ...item, ...update })));
+  }
+
   function updateQuoteItem(itemId: string, update: Partial<Pick<QuoteItem, "name" | "quantity" | "manualMinutes" | "filamentGrams">>) {
     setQuoteItems((previous) =>
       previous.map((item) => {
@@ -743,13 +748,13 @@ function App() {
                   checked={pricing.color === "Colore"}
                   description="Bianco e nero restano prezzo base"
                   label={`Altro colore + ${formatCurrency(SURCHARGES.color)}`}
-                  onChange={(checked) => patchPricing({ color: checked ? "Colore" : "Bianco" })}
+                  onChange={(checked) => patchQuoteOptions({ color: checked ? "Colore" : "Bianco" })}
                 />
                 <ToggleOption
                   checked={pricing.finish === "Effetto pietra"}
                   description="Aggiunge il supplemento finitura"
                   label={`Effetto pietra + ${formatCurrency(SURCHARGES.stoneEffect)}`}
-                  onChange={(checked) => patchPricing({ finish: checked ? "Effetto pietra" : "Standard" })}
+                  onChange={(checked) => patchQuoteOptions({ finish: checked ? "Effetto pietra" : "Standard" })}
                 />
                 <label className="toggle-row compact-toggle">
                   <input

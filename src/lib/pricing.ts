@@ -130,15 +130,18 @@ export function applyManualUnitPriceToBreakdown(
   if (!normalizedManualUnitPrice) {
     return breakdown;
   }
-  const grossPrice = roundTo(normalizedManualUnitPrice * Math.max(1, quantity), 2);
+  const normalizedQuantity = Math.max(1, quantity);
   const vatRate = pricing.includeVat ? pricing.vatPercent / 100 : 0;
+  const surchargeNetPrice = breakdown.colorSurcharge + breakdown.finishSurcharge;
+  const surchargeGrossPrice = roundTo(surchargeNetPrice * (1 + vatRate), 2);
+  const grossPrice = roundTo(normalizedManualUnitPrice * normalizedQuantity + surchargeGrossPrice, 2);
   const netPrice = vatRate ? roundTo(grossPrice / (1 + vatRate), 2) : grossPrice;
   return {
     ...breakdown,
     netPrice,
     vatAmount: grossPrice - netPrice,
     grossPrice,
-    unitPrice: normalizedManualUnitPrice,
+    unitPrice: grossPrice / normalizedQuantity,
   };
 }
 
