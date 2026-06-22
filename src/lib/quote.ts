@@ -295,7 +295,7 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload): void {
   document.setTextColor(...COLORS.blue);
   document.setFont("helvetica", "bold");
   document.setFontSize(8);
-  document.text("IL PAGAMENTO PUÒ AVVENIRE IN DUE SOLUZIONI", margin + 6, depositY + 10);
+  document.text("IL PAGAMENTO PUÒ AVVENIRE IN DUE MODALITA'", margin + 6, depositY + 10);
   document.setTextColor(...COLORS.text);
   document.setFont("helvetica", "normal");
   document.setFontSize(9);
