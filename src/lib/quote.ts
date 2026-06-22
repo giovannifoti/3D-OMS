@@ -288,24 +288,37 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload): void {
   document.text(payload.date, pageWidth - margin, 23, { align: "right" });
 
   const depositY = 56;
-  const depositHeight = 43;
+  const depositHeight = 74;
   document.setFillColor(...COLORS.paleBlue);
   document.setDrawColor(...COLORS.border);
   document.roundedRect(margin, depositY, contentWidth, depositHeight, 2, 2, "FD");
   document.setTextColor(...COLORS.blue);
   document.setFont("helvetica", "bold");
-  document.setFontSize(10);
-  document.text(
-    `L'ordine verrà ritenuto confermato a seguito di un acconto pari al ${PAYMENT_DETAILS.depositPercent}%.`,
-    margin + 6,
-    depositY + 13,
+  document.setFontSize(8);
+  document.text("IL PAGAMENTO PUÒ AVVENIRE IN DUE SOLUZIONI", margin + 6, depositY + 10);
+  document.setTextColor(...COLORS.text);
+  document.setFont("helvetica", "normal");
+  document.setFontSize(9);
+  const installmentLines = document.splitTextToSize(
+    `1. Acconto del ${PAYMENT_DETAILS.depositPercent}% entro 48 ore dall'invio del preventivo e saldo rimanente prima della spedizione.`,
+    contentWidth - 12,
   );
+  document.text(installmentLines, margin + 6, depositY + 20, { lineHeightFactor: 1.25 });
+  const fullPaymentY = depositY + 20 + installmentLines.length * 4.2 + 3;
+  const fullPaymentLines = document.splitTextToSize(
+    "2. Pagamento in un'unica soluzione entro 48 ore dall'invio del preventivo.",
+    contentWidth - 12,
+  );
+  document.text(fullPaymentLines, margin + 6, fullPaymentY, { lineHeightFactor: 1.25 });
+  document.setTextColor(...COLORS.blue);
   document.setFont("helvetica", "bold");
-  document.setFontSize(18);
+  document.setFontSize(8);
+  document.text(`ACCONTO ${PAYMENT_DETAILS.depositPercent}%`, margin + 6, depositY + 57);
+  document.setFontSize(17);
   document.setTextColor(...COLORS.navy);
-  document.text(formatPdfCurrency(depositAmount), margin + 6, depositY + 31);
+  document.text(formatPdfCurrency(depositAmount), margin + 6, depositY + 69);
 
-  const paymentY = 113;
+  const paymentY = 144;
   const paymentHeight = 65;
   document.setTextColor(...COLORS.blue);
   document.setFont("helvetica", "bold");
