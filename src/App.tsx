@@ -8,6 +8,7 @@ import {
   FileText,
   History,
   Lock,
+  MapPin,
   Package,
   Palette,
   PlusCircle,
@@ -15,20 +16,25 @@ import {
   Save,
   Sparkles,
   Trash2,
+  Truck,
   Upload,
   UserRound,
   Weight,
 } from "lucide-react";
 import { parsePrintFile } from "./lib/fileParsers";
 import {
+  DEFAULT_SHIPPING_METHOD,
   DEFAULT_PRICING,
   PRINTER_PROFILE,
+  SHIPPING_OPTIONS,
   SURCHARGES,
   applyManualUnitPriceToBreakdown,
+  applyShippingToBreakdown,
   calculatePrice,
   formatCurrency,
   formatNumber,
   getMaterial,
+  getShippingOption,
   normalizeManualUnitPrice,
   suggestPricingFromMetrics,
 } from "./lib/pricing";
@@ -43,6 +49,7 @@ import type {
   PricingInputs,
   PrintMetrics,
   QuoteItem,
+  ShippingMethod,
 } from "./types";
 
 type ViewKey = "nuovo" | "storico" | "prodotti";
@@ -72,6 +79,7 @@ function App() {
   const [quoteItems, setQuoteItems] = useState<QuoteItem[]>([]);
   const [itemName, setItemName] = useState("Stampa personalizzata");
   const [pricing, setPricing] = useState<PricingInputs>(DEFAULT_PRICING);
+  const [shippingMethod, setShippingMethod] = useState<ShippingMethod>(DEFAULT_SHIPPING_METHOD);
   const [manualQuoteUnitPrice, setManualQuoteUnitPrice] = useState<number | undefined>();
   const [customer, setCustomer] = useState<Customer>(EMPTY_CUSTOMER);
   const [customerNumber, setCustomerNumber] = useState("");
@@ -129,14 +137,19 @@ function App() {
       };
     });
     const automaticBreakdown = calculatePrice(pricing);
+    const baseBreakdown = rows.length
+      ? combinePriceBreakdowns(rows.map((row) => row.breakdown))
+      : applyManualUnitPriceToBreakdown(automaticBreakdown, manualQuoteUnitPrice, pricing.quantity, pricing);
+    const totalQuantity = rows.length
+      ? rows.reduce((total, row) => total + row.item.quantity, 0)
+      : pricing.quantity;
     return {
       rows,
       automaticBreakdown,
-      breakdown: rows.length
-        ? combinePriceBreakdowns(rows.map((row) => row.breakdown))
-        : applyManualUnitPriceToBreakdown(automaticBreakdown, manualQuoteUnitPrice, pricing.quantity, pricing),
+      baseBreakdown,
+      breakdown: applyShippingToBreakdown(baseBreakdown, shippingMethod, totalQuantity, pricing),
     };
-  }, [manualQuoteUnitPrice, pricing, quoteItems]);
+  }, [manualQuoteUnitPrice, pricing, quoteItems, shippingMethod]);
   const breakdown = pricedQuote.breakdown;
   const quoteTotals = useMemo(
     () => ({
@@ -148,6 +161,7 @@ function App() {
     [quoteItems],
   );
   const selectedMaterial = getMaterial("pla");
+  const shippingOption = getShippingOption(shippingMethod);
   const filteredOrders = activeStatus === "Tutti" ? orders : orders.filter((order) => order.status === activeStatus);
   const selectedProducts = products.filter((product) => selectedProductIds.includes(product.id));
   const quoteWarnings = quoteItems.length
@@ -354,6 +368,8 @@ function App() {
       marginPercent: pricing.marginPercent,
       includeVat: pricing.includeVat,
       vatPercent: pricing.vatPercent,
+      shippingMethod,
+      shippingCost: shippingOption.cost,
       netPrice: breakdown.netPrice,
       grossPrice: breakdown.grossPrice,
       metrics: quoteMetrics,
@@ -380,7 +396,9 @@ function App() {
       customerNumber,
       metrics: quoteMetrics,
       pricing,
+      baseBreakdown: pricedQuote.baseBreakdown,
       breakdown,
+      shippingMethod,
       items: pricedQuote.rows,
       notes,
     });
@@ -730,6 +748,7 @@ function App() {
                 <InfoRow label="Guadagno 125%" value={formatCurrency(breakdown.marginAmount)} />
                 {breakdown.colorSurcharge > 0 && <InfoRow label="Colore" value={formatCurrency(breakdown.colorSurcharge)} />}
                 {breakdown.finishSurcharge > 0 && <InfoRow label="Effetto pietra" value={formatCurrency(breakdown.finishSurcharge)} />}
+                <InfoRow label={shippingOption.label} value={formatCurrency(shippingOption.cost)} />
                 {!quoteItems.length && pricing.quantity > 1 && <InfoRow label="Prezzo unitario" value={formatCurrency(breakdown.unitPrice)} />}
               </div>
             </section>
@@ -764,6 +783,30 @@ function App() {
                   />
                   Applica IVA {pricing.vatPercent}%
                 </label>
+                <div className="shipping-field">
+                  <span>Spedizione</span>
+                  <div className="shipping-segmented" role="group" aria-label="Modalita di spedizione">
+                    {(Object.keys(SHIPPING_OPTIONS) as ShippingMethod[]).map((method) => {
+                      const option = getShippingOption(method);
+                      const ShippingIcon = method === "inpost" ? MapPin : Truck;
+                      return (
+                        <button
+                          aria-pressed={shippingMethod === method}
+                          className={shippingMethod === method ? "is-selected" : ""}
+                          key={method}
+                          type="button"
+                          onClick={() => setShippingMethod(method)}
+                        >
+                          <ShippingIcon size={17} />
+                          <span>
+                            <strong>{option.shortLabel}</strong>
+                            <small>{formatCurrency(option.cost)}</small>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             </section>
 
@@ -844,7 +887,7 @@ function App() {
                   <div>
                     <strong>{formatCurrency(order.grossPrice)}</strong>
                     <span>
-                      {formatNumber(order.metrics.printTimeMinutes ?? 0)} min · {formatNumber(order.averagePowerKw ?? PRINTER_PROFILE.defaultAveragePowerKw, 2)} kW
+                      {formatNumber(order.metrics.printTimeMinutes ?? 0)} min · {order.shippingMethod ? getShippingOption(order.shippingMethod).shortLabel : "Spedizione non salvata"}
                     </span>
                   </div>
                   <select value={order.status} onChange={(event) => updateOrderStatus(order.id, event.target.value as OrderStatus)}>

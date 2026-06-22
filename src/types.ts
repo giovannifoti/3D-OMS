@@ -128,6 +128,8 @@ export type FilamentColor = "Bianco" | "Nero" | "Colore";
 
 export type PrintFinish = "Standard" | "Effetto pietra";
 
+export type ShippingMethod = "inpost" | "home";
+
 export type Customer = {
   name: string;
   email: string;
@@ -159,6 +161,8 @@ export type Order = {
   marginPercent?: number;
   includeVat?: boolean;
   vatPercent?: number;
+  shippingMethod?: ShippingMethod;
+  shippingCost?: number;
   netPrice: number;
   grossPrice: number;
   metrics: PrintMetrics;

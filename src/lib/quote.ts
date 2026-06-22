@@ -1,11 +1,12 @@
 import { jsPDF } from "jspdf";
 import { autoTable } from "jspdf-autotable";
-import type { Customer, Order, PriceBreakdown, PricingInputs, PrintMetrics, QuoteItem } from "../types";
+import type { Customer, Order, PriceBreakdown, PricingInputs, PrintMetrics, QuoteItem, ShippingMethod } from "../types";
 import {
   DEFAULT_PRICING,
   PRINTER_PROFILE,
   applyManualUnitPriceToBreakdown,
   calculatePrice,
+  getShippingOption,
   normalizeManualUnitPrice,
 } from "./pricing";
 
@@ -20,7 +21,9 @@ type QuotePayload = {
   customerNumber: string;
   metrics: PrintMetrics;
   pricing: PricingInputs;
+  baseBreakdown: PriceBreakdown;
   breakdown: PriceBreakdown;
+  shippingMethod: ShippingMethod;
   items?: QuoteLinePayload[];
   notes: string;
 };
@@ -43,6 +46,10 @@ type PdfPayload = {
   grossPrice: number;
   includeVat: boolean;
   vatPercent: number;
+  shipping?: {
+    label: string;
+    cost: number;
+  };
   notes: string;
 };
 
@@ -74,6 +81,7 @@ export function openOrderQuote(order: Order): void {
 }
 
 export function createQuotePdfDocument(payload: QuotePayload): jsPDF {
+  const shipping = getShippingOption(payload.shippingMethod);
   const lines = payload.items?.length
     ? payload.items.map(({ item, breakdown }) => ({
         name: item.name,
@@ -85,8 +93,8 @@ export function createQuotePdfDocument(payload: QuotePayload): jsPDF {
         {
           name: payload.metrics.fileName || "Stampa 3D",
           quantity: payload.pricing.quantity,
-          unitPrice: payload.breakdown.netPrice / Math.max(1, payload.pricing.quantity),
-          totalPrice: payload.breakdown.netPrice,
+          unitPrice: payload.baseBreakdown.netPrice / Math.max(1, payload.pricing.quantity),
+          totalPrice: payload.baseBreakdown.netPrice,
         },
       ];
 
@@ -96,28 +104,37 @@ export function createQuotePdfDocument(payload: QuotePayload): jsPDF {
     customer: payload.customer,
     customerNumber: payload.customerNumber,
     lines,
-    netPrice: payload.breakdown.netPrice,
-    vatAmount: payload.breakdown.vatAmount,
+    netPrice: payload.baseBreakdown.netPrice,
+    vatAmount: payload.baseBreakdown.vatAmount,
     grossPrice: payload.breakdown.grossPrice,
     includeVat: payload.pricing.includeVat,
     vatPercent: payload.pricing.vatPercent,
+    shipping: {
+      label: shipping.label,
+      cost: shipping.cost,
+    },
     notes: payload.notes,
   });
 }
 
 export function createOrderQuotePdfDocument(order: Order): jsPDF {
-  const lines = order.items?.length ? buildSavedOrderLines(order) : [buildSavedOrderSingleLine(order)];
+  const shipping = getSavedOrderShipping(order);
+  const productTotals = getSavedOrderProductTotals(order, shipping?.cost);
+  const lines = order.items?.length
+    ? buildSavedOrderLines(order)
+    : [buildSavedOrderSingleLine(order, productTotals.netPrice)];
   return createPdf({
     quoteNumber: order.quoteNumber,
     date: new Date(order.createdAt).toLocaleDateString("it-IT"),
     customer: order.customer,
     customerNumber: order.customerNumber,
     lines,
-    netPrice: order.netPrice,
-    vatAmount: order.grossPrice - order.netPrice,
+    netPrice: productTotals.netPrice,
+    vatAmount: productTotals.vatAmount,
     grossPrice: order.grossPrice,
     includeVat: Boolean(order.includeVat),
     vatPercent: order.vatPercent ?? 22,
+    shipping,
     notes: order.notes,
   });
 }
@@ -199,7 +216,7 @@ function createPdf(payload: PdfPayload): jsPDF {
   });
 
   const tableEndY = getLastTableY(document);
-  const totalsHeight = payload.includeVat ? 39 : 31;
+  const totalsHeight = getTotalsHeight(payload);
   const totalsY = ensureSpace(document, tableEndY + 8, totalsHeight + 34, margin);
   drawTotals(document, payload, totalsY, pageWidth, margin);
   drawNotes(document, payload.notes, totalsY + totalsHeight + 10, pageWidth, margin);
@@ -209,9 +226,9 @@ function createPdf(payload: PdfPayload): jsPDF {
 }
 
 function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: number, margin: number): void {
-  const width = 78;
+  const width = 88;
   const x = pageWidth - margin - width;
-  const height = payload.includeVat ? 39 : 31;
+  const height = getTotalsHeight(payload);
   document.setFillColor(...COLORS.paleBlue);
   document.setDrawColor(...COLORS.border);
   document.roundedRect(x, y, width, height, 2, 2, "FD");
@@ -229,13 +246,18 @@ function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: 
     document.text(formatPdfCurrency(payload.vatAmount), x + width - 5, y + 14, { align: "right" });
   }
 
-  const shippingY = payload.includeVat ? y + 21 : y + 14;
-  document.setTextColor(...COLORS.muted);
-  document.text("Spese di spedizione", x + 5, shippingY);
-  document.setTextColor(...COLORS.text);
-  document.text("Da concordare", x + width - 5, shippingY, { align: "right" });
+  let lastDetailY = payload.includeVat ? y + 14 : y + 7;
+  if (payload.shipping) {
+    const shippingY = payload.includeVat ? y + 21 : y + 14;
+    document.setFontSize(8.5);
+    document.setTextColor(...COLORS.muted);
+    document.text(cleanPdfText(payload.shipping.label), x + 5, shippingY);
+    document.setTextColor(...COLORS.text);
+    document.text(formatPdfCurrency(payload.shipping.cost), x + width - 5, shippingY, { align: "right" });
+    lastDetailY = shippingY;
+  }
 
-  const totalY = shippingY + 11;
+  const totalY = lastDetailY + (payload.shipping ? 11 : payload.includeVat ? 10 : 9);
   document.setDrawColor(...COLORS.blue);
   document.line(x + 5, totalY - 5, x + width - 5, totalY - 5);
   document.setFont("helvetica", "bold");
@@ -363,12 +385,34 @@ function buildSavedOrderLines(order: Order): PdfLine[] {
   });
 }
 
-function buildSavedOrderSingleLine(order: Order): PdfLine {
+function buildSavedOrderSingleLine(order: Order, netPrice: number): PdfLine {
   return {
     name: order.fileName || "Stampa 3D",
     quantity: order.quantity,
-    unitPrice: order.netPrice / Math.max(1, order.quantity),
-    totalPrice: order.netPrice,
+    unitPrice: netPrice / Math.max(1, order.quantity),
+    totalPrice: netPrice,
+  };
+}
+
+function getSavedOrderShipping(order: Order): PdfPayload["shipping"] {
+  if (!order.shippingMethod) {
+    return undefined;
+  }
+  const option = getShippingOption(order.shippingMethod);
+  return {
+    label: option.label,
+    cost: order.shippingCost ?? option.cost,
+  };
+}
+
+function getSavedOrderProductTotals(order: Order, shippingCost = 0): { netPrice: number; vatAmount: number } {
+  const vatRate = order.includeVat ? (order.vatPercent ?? 22) / 100 : 0;
+  const shippingNetPrice = vatRate ? shippingCost / (1 + vatRate) : shippingCost;
+  const productNetPrice = roundPdfMoney(order.netPrice - shippingNetPrice);
+  const productGrossPrice = roundPdfMoney(order.grossPrice - shippingCost);
+  return {
+    netPrice: productNetPrice,
+    vatAmount: roundPdfMoney(productGrossPrice - productNetPrice),
   };
 }
 
@@ -410,6 +454,14 @@ function ensureSpace(document: jsPDF, requestedY: number, requiredHeight: number
 
 function getLastTableY(document: jsPDF): number {
   return (document as jsPDF & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? 90;
+}
+
+function getTotalsHeight(payload: PdfPayload): number {
+  return 23 + (payload.includeVat ? 8 : 0) + (payload.shipping ? 8 : 0);
+}
+
+function roundPdfMoney(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function formatPdfCurrency(value: number): string {

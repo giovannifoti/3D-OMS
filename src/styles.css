@@ -343,6 +343,72 @@ button:disabled {
   margin-top: 0;
 }
 
+.shipping-field {
+  display: grid;
+  gap: 7px;
+}
+
+.shipping-field > span {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.shipping-segmented {
+  background: #eaf2ff;
+  border: 1px solid #cfe0f5;
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 3px;
+}
+
+.shipping-segmented button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-soft);
+  display: flex;
+  gap: 8px;
+  min-height: 48px;
+  min-width: 0;
+  padding: 7px 8px;
+  text-align: left;
+}
+
+.shipping-segmented button:hover {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.shipping-segmented button.is-selected {
+  background: #ffffff;
+  border-color: rgba(29, 111, 216, 0.45);
+  box-shadow: 0 2px 6px rgba(16, 40, 72, 0.12);
+  color: var(--teal-dark);
+}
+
+.shipping-segmented button > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.shipping-segmented strong,
+.shipping-segmented small {
+  line-height: 1.2;
+}
+
+.shipping-segmented strong {
+  font-size: 12px;
+}
+
+.shipping-segmented small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .left-rail,
 .right-rail,
 .center-stack {

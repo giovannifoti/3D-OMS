@@ -1,4 +1,4 @@
-import type { MaterialKey, MaterialProfile, PriceBreakdown, PricingInputs, PrintMetrics } from "../types";
+import type { MaterialKey, MaterialProfile, PriceBreakdown, PricingInputs, PrintMetrics, ShippingMethod } from "../types";
 
 export const MATERIALS: MaterialProfile[] = [
   { key: "pla", name: "PLA", costPerKg: 15.99, density: 1.24, diameterMm: 1.75, wastePercent: 8 },
@@ -17,6 +17,21 @@ export const SURCHARGES = {
   color: 0.5,
   stoneEffect: 0.5,
 } as const;
+
+export const SHIPPING_OPTIONS: Record<ShippingMethod, { label: string; shortLabel: string; cost: number }> = {
+  inpost: {
+    label: "Punto di ritiro InPost",
+    shortLabel: "Ritiro InPost",
+    cost: 5.5,
+  },
+  home: {
+    label: "Consegna a domicilio",
+    shortLabel: "Consegna a domicilio",
+    cost: 8.5,
+  },
+};
+
+export const DEFAULT_SHIPPING_METHOD: ShippingMethod = "inpost";
 
 export const DEFAULT_PRICING: PricingInputs = {
   materialKey: "pla",
@@ -118,6 +133,30 @@ export function calculatePrice(inputs: PricingInputs): PriceBreakdown {
     colorSurcharge,
     finishSurcharge,
   };
+}
+
+export function applyShippingToBreakdown(
+  breakdown: PriceBreakdown,
+  shippingMethod: ShippingMethod,
+  quantity: number,
+  pricing: Pick<PricingInputs, "includeVat" | "vatPercent">,
+): PriceBreakdown {
+  const shippingGrossPrice = getShippingOption(shippingMethod).cost;
+  const vatRate = pricing.includeVat ? pricing.vatPercent / 100 : 0;
+  const shippingNetPrice = vatRate ? roundTo(shippingGrossPrice / (1 + vatRate), 2) : shippingGrossPrice;
+  const netPrice = roundTo(breakdown.netPrice + shippingNetPrice, 2);
+  const grossPrice = roundTo(breakdown.grossPrice + shippingGrossPrice, 2);
+  return {
+    ...breakdown,
+    netPrice,
+    vatAmount: grossPrice - netPrice,
+    grossPrice,
+    unitPrice: grossPrice / Math.max(1, quantity),
+  };
+}
+
+export function getShippingOption(shippingMethod: ShippingMethod) {
+  return SHIPPING_OPTIONS[shippingMethod];
 }
 
 export function applyManualUnitPriceToBreakdown(
