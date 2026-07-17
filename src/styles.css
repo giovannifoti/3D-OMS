@@ -1076,6 +1076,38 @@ textarea:focus {
   margin-bottom: 14px;
 }
 
+.catalog-toolbar {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.catalog-search-field {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  gap: 8px;
+  padding: 10px;
+}
+
+.catalog-search-field > span {
+  align-items: center;
+  color: var(--brand-blue-dark);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 7px;
+}
+
+.catalog-search-field input {
+  background: var(--brand-soft);
+  min-height: 42px;
+}
+
+.catalog-empty {
+  grid-column: 1 / -1;
+}
+
 .catalog-actions .primary-button,
 .catalog-actions .secondary-button {
   flex: 0 0 auto;

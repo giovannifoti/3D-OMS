@@ -15,6 +15,7 @@ import {
   PlusCircle,
   ReceiptText,
   Save,
+  Search,
   Sparkles,
   Trash2,
   Truck,
@@ -91,6 +92,7 @@ function App() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<FrequentProduct[]>([]);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [productSearch, setProductSearch] = useState("");
   const [productDraft, setProductDraft] = useState(EMPTY_PRODUCT);
   const [productSource, setProductSource] = useState<ParsedFile | null>(null);
   const [isParsing, setIsParsing] = useState(false);
@@ -182,6 +184,23 @@ function App() {
       .includes(normalizedOrderSearch);
   });
   const selectedProducts = products.filter((product) => selectedProductIds.includes(product.id));
+  const normalizedProductSearch = productSearch.trim().toLowerCase();
+  const filteredProducts = normalizedProductSearch
+    ? products.filter((product) =>
+        [
+          product.name,
+          product.sku,
+          product.sourceFileName,
+          product.notes,
+          product.color,
+          product.finish,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedProductSearch),
+      )
+    : products;
   const quoteWarnings = quoteItems.length
     ? quoteItems.flatMap((item) => item.metrics.warnings.map((warning) => `${item.name}: ${warning}`))
     : (parsed?.metrics.warnings ?? []);
@@ -538,8 +557,8 @@ function App() {
   }
 
   function applyAllProducts() {
-    applyProducts(products, {
-      defaultQuoteName: products.length === 1 ? products[0].name : `Preventivo ${products.length} prodotti frequenti`,
+    applyProducts(filteredProducts, {
+      defaultQuoteName: filteredProducts.length === 1 ? filteredProducts[0].name : `Preventivo ${filteredProducts.length} prodotti frequenti`,
     });
     setSelectedProductIds([]);
   }
@@ -581,6 +600,10 @@ function App() {
     setSelectedProductIds((previous) =>
       checked ? Array.from(new Set([...previous, productId])) : previous.filter((id) => id !== productId),
     );
+  }
+
+  function selectFilteredProducts() {
+    setSelectedProductIds((previous) => Array.from(new Set([...previous, ...filteredProducts.map((product) => product.id)])));
   }
 
   return (
@@ -1136,29 +1159,49 @@ function App() {
           <section className="panel">
             <div className="catalog-header">
               <PanelTitle icon={<Package size={18} />} title="Catalogo rapido" />
-              {products.length ? <span>{selectedProducts.length} selezionati</span> : null}
+              {products.length ? (
+                <span>
+                  {filteredProducts.length} risultati
+                  {selectedProducts.length ? ` · ${selectedProducts.length} selezionati` : ""}
+                </span>
+              ) : null}
             </div>
-            {products.length ? (
-              <div className="catalog-actions">
-                <button className="secondary-button" onClick={() => setSelectedProductIds(products.map((product) => product.id))}>
-                  Seleziona tutti
-                </button>
-                <button className="secondary-button" disabled={!selectedProducts.length} onClick={() => setSelectedProductIds([])}>
-                  Deseleziona
-                </button>
-                <button className="primary-button" disabled={!selectedProducts.length} onClick={applySelectedProducts}>
-                  <ReceiptText size={18} />
-                  Usa selezionati
-                </button>
-                <button className="secondary-button" onClick={applyAllProducts}>
-                  <Package size={18} />
-                  Usa tutti
-                </button>
-              </div>
-            ) : null}
+            <div className="catalog-toolbar">
+              <label className="catalog-search-field">
+                <span>
+                  <Search size={16} />
+                  Cerca prodotto
+                </span>
+                <input
+                  disabled={!products.length}
+                  placeholder={products.length ? "Nome, SKU, file o note" : "Salva prima un prodotto frequente"}
+                  value={productSearch}
+                  onChange={(event) => setProductSearch(event.target.value)}
+                />
+              </label>
+              {products.length ? (
+                <div className="catalog-actions">
+                  <button className="secondary-button" disabled={!filteredProducts.length} onClick={selectFilteredProducts}>
+                    {normalizedProductSearch ? "Seleziona risultati" : "Seleziona tutti"}
+                  </button>
+                  <button className="secondary-button" disabled={!selectedProducts.length} onClick={() => setSelectedProductIds([])}>
+                    Deseleziona
+                  </button>
+                  <button className="primary-button" disabled={!selectedProducts.length} onClick={applySelectedProducts}>
+                    <ReceiptText size={18} />
+                    Usa selezionati
+                  </button>
+                  <button className="secondary-button" disabled={!filteredProducts.length} onClick={applyAllProducts}>
+                    <Package size={18} />
+                    {normalizedProductSearch ? "Usa risultati" : "Usa tutti"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <div className="product-catalog">
               {products.length ? (
-                products.map((product) => (
+                filteredProducts.length ? (
+                filteredProducts.map((product) => (
                   <article className={`product-card ${selectedProductIds.includes(product.id) ? "is-selected" : ""}`} key={product.id}>
                     <div className="product-card-head">
                       <div>
@@ -1223,6 +1266,12 @@ function App() {
                     </div>
                   </article>
                 ))
+                ) : (
+                  <div className="empty-orders catalog-empty">
+                    <Search size={24} />
+                    <span>Nessun prodotto trovato con questa ricerca.</span>
+                  </div>
+                )
               ) : (
                 <div className="empty-orders">
                   <Package size={24} />
