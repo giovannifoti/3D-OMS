@@ -53,15 +53,23 @@ type PdfPayload = {
   notes: string;
 };
 
+type PdfAssets = {
+  markDataUrl?: string;
+};
+
 const COLORS = {
-  navy: [16, 40, 72] as [number, number, number],
-  blue: [29, 111, 216] as [number, number, number],
-  paleBlue: [234, 242, 255] as [number, number, number],
-  border: [215, 226, 238] as [number, number, number],
-  text: [23, 32, 42] as [number, number, number],
-  muted: [100, 115, 134] as [number, number, number],
+  navy: [18, 18, 29] as [number, number, number],
+  blue: [76, 110, 245] as [number, number, number],
+  magenta: [224, 48, 179] as [number, number, number],
+  lime: [188, 255, 48] as [number, number, number],
+  paleBlue: [242, 246, 255] as [number, number, number],
+  border: [219, 226, 242] as [number, number, number],
+  text: [24, 26, 39] as [number, number, number],
+  muted: [95, 104, 125] as [number, number, number],
   white: [255, 255, 255] as [number, number, number],
 };
+
+const BRAND_MARK_SRC = "/brand/logo-mark.png";
 
 const PAYMENT_DETAILS = {
   holder: "Intestatario non configurato",
@@ -70,17 +78,17 @@ const PAYMENT_DETAILS = {
   depositPercent: 25,
 } as const;
 
-export function openQuote(payload: QuotePayload): void {
-  const document = createQuotePdfDocument(payload);
+export async function openQuote(payload: QuotePayload): Promise<void> {
+  const document = createQuotePdfDocument(payload, await loadPdfAssets());
   document.save(`${safeFileName(payload.quoteNumber)}.pdf`);
 }
 
-export function openOrderQuote(order: Order): void {
-  const document = createOrderQuotePdfDocument(order);
+export async function openOrderQuote(order: Order): Promise<void> {
+  const document = createOrderQuotePdfDocument(order, await loadPdfAssets());
   document.save(`${safeFileName(order.quoteNumber)}.pdf`);
 }
 
-export function createQuotePdfDocument(payload: QuotePayload): jsPDF {
+export function createQuotePdfDocument(payload: QuotePayload, assets: PdfAssets = {}): jsPDF {
   const shipping = getShippingOption(payload.shippingMethod);
   const lines = payload.items?.length
     ? payload.items.map(({ item, breakdown }) => ({
@@ -114,10 +122,10 @@ export function createQuotePdfDocument(payload: QuotePayload): jsPDF {
       cost: shipping.cost,
     },
     notes: payload.notes,
-  });
+  }, assets);
 }
 
-export function createOrderQuotePdfDocument(order: Order): jsPDF {
+export function createOrderQuotePdfDocument(order: Order, assets: PdfAssets = {}): jsPDF {
   const shipping = getSavedOrderShipping(order);
   const productTotals = getSavedOrderProductTotals(order, shipping?.cost);
   const lines = order.items?.length
@@ -136,32 +144,29 @@ export function createOrderQuotePdfDocument(order: Order): jsPDF {
     vatPercent: order.vatPercent ?? 22,
     shipping,
     notes: order.notes,
-  });
+  }, assets);
 }
 
-function createPdf(payload: PdfPayload): jsPDF {
+function createPdf(payload: PdfPayload, assets: PdfAssets): jsPDF {
   const document = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageWidth = document.internal.pageSize.getWidth();
   const margin = 18;
 
   document.setProperties({
     title: `Preventivo ${payload.quoteNumber}`,
-    subject: "Preventivo stampa 3D",
-    author: "",
-    creator: "",
+    subject: "Preventivo stampa 3D Artigiani del3d",
+    author: "Artigiani del3d",
+    creator: "Artigiani del3d",
   });
 
-  document.setFillColor(...COLORS.navy);
-  document.rect(0, 0, pageWidth, 44, "F");
-  document.setTextColor(...COLORS.white);
-  document.setFont("helvetica", "bold");
-  document.setFontSize(9);
-  document.text("PREVENTIVO STAMPA 3D", margin, 16);
-  document.setFontSize(21);
-  document.text(cleanPdfText(payload.quoteNumber), margin, 29);
-  document.setFont("helvetica", "normal");
-  document.setFontSize(10);
-  document.text(payload.date, pageWidth - margin, 20, { align: "right" });
+  drawPdfHeader(document, {
+    assets,
+    label: "PREVENTIVO STAMPA 3D",
+    title: payload.quoteNumber,
+    date: payload.date,
+    margin,
+    pageWidth,
+  });
 
   const customerLines = compactCustomerLines(payload.customer, payload.customerNumber);
   const customerBoxHeight = Math.max(24, 14 + customerLines.length * 5);
@@ -220,7 +225,7 @@ function createPdf(payload: PdfPayload): jsPDF {
   const totalsY = ensureSpace(document, tableEndY + 8, totalsHeight + 34, margin);
   drawTotals(document, payload, totalsY, pageWidth, margin);
   drawNotes(document, payload.notes, totalsY + totalsHeight + 10, pageWidth, margin);
-  drawPaymentPage(document, payload);
+  drawPaymentPage(document, payload, assets);
 
   return document;
 }
@@ -267,25 +272,22 @@ function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: 
   document.text(formatPdfCurrency(payload.grossPrice), x + width - 5, totalY, { align: "right" });
 }
 
-function drawPaymentPage(document: jsPDF, payload: PdfPayload): void {
+function drawPaymentPage(document: jsPDF, payload: PdfPayload, assets: PdfAssets): void {
   document.addPage();
   const pageWidth = document.internal.pageSize.getWidth();
   const margin = 18;
   const contentWidth = pageWidth - margin * 2;
-  const depositAmount = (payload.grossPrice * PAYMENT_DETAILS.depositPercent) / 100;
+  const depositAmount = Math.ceil((payload.grossPrice * PAYMENT_DETAILS.depositPercent) / 100);
 
-  document.setFillColor(...COLORS.navy);
-  document.rect(0, 0, pageWidth, 44, "F");
-  document.setTextColor(...COLORS.white);
-  document.setFont("helvetica", "bold");
-  document.setFontSize(9);
-  document.text("PAGAMENTO", margin, 16);
-  document.setFontSize(21);
-  document.text("Dettagli di pagamento", margin, 29);
-  document.setFont("helvetica", "normal");
-  document.setFontSize(9);
-  document.text(cleanPdfText(payload.quoteNumber), pageWidth - margin, 17, { align: "right" });
-  document.text(payload.date, pageWidth - margin, 23, { align: "right" });
+  drawPdfHeader(document, {
+    assets,
+    label: "PAGAMENTO",
+    title: "Dettagli di pagamento",
+    date: payload.date,
+    margin,
+    pageWidth,
+    rightText: payload.quoteNumber,
+  });
 
   const depositY = 56;
   const depositHeight = 74;
@@ -349,6 +351,55 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload): void {
   document.setFontSize(11);
   document.text(PAYMENT_DETAILS.bank, valueX, firstRowY + 34);
 
+}
+
+function drawPdfHeader(
+  document: jsPDF,
+  options: {
+    assets: PdfAssets;
+    label: string;
+    title: string;
+    date: string;
+    margin: number;
+    pageWidth: number;
+    rightText?: string;
+  },
+): void {
+  const { assets, label, title, date, margin, pageWidth, rightText } = options;
+  document.setFillColor(...COLORS.navy);
+  document.rect(0, 0, pageWidth, 44, "F");
+  if (assets.markDataUrl) {
+    document.addImage(assets.markDataUrl, "PNG", margin, 9, 24, 24);
+  } else {
+    document.setDrawColor(...COLORS.blue);
+    document.setLineWidth(0.8);
+    document.roundedRect(margin, 9, 24, 24, 4, 4, "S");
+  }
+
+  const textX = margin + 31;
+  document.setFont("helvetica", "bold");
+  document.setFontSize(8);
+  document.setTextColor(...COLORS.lime);
+  document.text("ARTIGIANI DEL3D", textX, 13);
+  document.setTextColor(...COLORS.white);
+  document.setFontSize(8.5);
+  document.text(label, textX, 20);
+  document.setFontSize(19);
+  document.text(cleanPdfText(title), textX, 31);
+
+  document.setFont("helvetica", "normal");
+  document.setFontSize(9);
+  document.setTextColor(215, 222, 238);
+  if (rightText) {
+    document.text(cleanPdfText(rightText), pageWidth - margin, 17, { align: "right" });
+    document.text(date, pageWidth - margin, 23, { align: "right" });
+  } else {
+    document.text(date, pageWidth - margin, 22, { align: "right" });
+  }
+  document.setFillColor(...COLORS.magenta);
+  document.rect(0, 43, pageWidth * 0.58, 1, "F");
+  document.setFillColor(...COLORS.blue);
+  document.rect(pageWidth * 0.58, 43, pageWidth * 0.42, 1, "F");
 }
 
 function drawNotes(document: jsPDF, notes: string, requestedY: number, pageWidth: number, margin: number): void {
@@ -471,6 +522,30 @@ function getLastTableY(document: jsPDF): number {
 
 function getTotalsHeight(payload: PdfPayload): number {
   return 23 + (payload.includeVat ? 8 : 0) + (payload.shipping ? 8 : 0);
+}
+
+async function loadPdfAssets(): Promise<PdfAssets> {
+  return {
+    markDataUrl: await loadImageDataUrl(BRAND_MARK_SRC),
+  };
+}
+
+async function loadImageDataUrl(src: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(src);
+    if (!response.ok) {
+      return undefined;
+    }
+    const blob = await response.blob();
+    return await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(typeof reader.result === "string" ? reader.result : undefined));
+      reader.addEventListener("error", () => resolve(undefined));
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function roundPdfMoney(value: number): number {

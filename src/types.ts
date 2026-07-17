@@ -147,6 +147,7 @@ export type Order = {
   id: string;
   quoteNumber: string;
   createdAt: string;
+  updatedAt?: string;
   status: OrderStatus;
   customer: Customer;
   customerNumber: string;
@@ -163,6 +164,8 @@ export type Order = {
   vatPercent?: number;
   shippingMethod?: ShippingMethod;
   shippingCost?: number;
+  manualUnitPrice?: number;
+  manualPrice?: number;
   netPrice: number;
   grossPrice: number;
   metrics: PrintMetrics;

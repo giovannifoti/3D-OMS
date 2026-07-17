@@ -4,6 +4,7 @@ import {
   Archive,
   Calculator,
   Clock3,
+  Edit3,
   FileArchive,
   FileText,
   History,
@@ -19,6 +20,7 @@ import {
   Truck,
   Upload,
   UserRound,
+  XCircle,
   Weight,
 } from "lucide-react";
 import { parsePrintFile } from "./lib/fileParsers";
@@ -55,6 +57,8 @@ import type {
 type ViewKey = "nuovo" | "storico" | "prodotti";
 
 const STATUSES: OrderStatus[] = ["Bozza", "Preventivo inviato", "Accettato", "In stampa", "Completato"];
+const BRAND_WORDMARK_SRC = "/brand/logo-artigianidel3d-light.png";
+const DEFAULT_NOTES = "Validita preventivo: 15 giorni. Bianco e nero inclusi nel prezzo base.";
 
 const EMPTY_CUSTOMER: Customer = {
   name: "",
@@ -83,7 +87,7 @@ function App() {
   const [manualQuoteUnitPrice, setManualQuoteUnitPrice] = useState<number | undefined>();
   const [customer, setCustomer] = useState<Customer>(EMPTY_CUSTOMER);
   const [customerNumber, setCustomerNumber] = useState("");
-  const [notes, setNotes] = useState("Validita preventivo: 15 giorni. Bianco e nero inclusi nel prezzo base.");
+  const [notes, setNotes] = useState(DEFAULT_NOTES);
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<FrequentProduct[]>([]);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
@@ -94,6 +98,9 @@ function App() {
   const [dragActive, setDragActive] = useState(false);
   const [productDragActive, setProductDragActive] = useState(false);
   const [activeStatus, setActiveStatus] = useState<OrderStatus | "Tutti">("Tutti");
+  const [orderSearch, setOrderSearch] = useState("");
+  const [draftQuoteNumber, setDraftQuoteNumber] = useState(() => makeQuoteNumber());
+  const [editingOrderId, setEditingOrderId] = useState<string | undefined>();
   const demoLoaded = useRef(false);
 
   useEffect(() => {
@@ -162,7 +169,18 @@ function App() {
   );
   const selectedMaterial = getMaterial("pla");
   const shippingOption = getShippingOption(shippingMethod);
-  const filteredOrders = activeStatus === "Tutti" ? orders : orders.filter((order) => order.status === activeStatus);
+  const editingOrder = editingOrderId ? orders.find((order) => order.id === editingOrderId) : undefined;
+  const activeQuoteNumber = editingOrder?.quoteNumber ?? draftQuoteNumber;
+  const normalizedOrderSearch = orderSearch.trim().toLowerCase();
+  const filteredOrders = (activeStatus === "Tutti" ? orders : orders.filter((order) => order.status === activeStatus)).filter((order) => {
+    if (!normalizedOrderSearch) {
+      return true;
+    }
+    return [order.quoteNumber, order.customer.name, order.customerNumber, order.customer.phone, order.fileName]
+      .join(" ")
+      .toLowerCase()
+      .includes(normalizedOrderSearch);
+  });
   const selectedProducts = products.filter((product) => selectedProductIds.includes(product.id));
   const quoteWarnings = quoteItems.length
     ? quoteItems.flatMap((item) => item.metrics.warnings.map((warning) => `${item.name}: ${warning}`))
@@ -348,13 +366,30 @@ function App() {
     });
   }
 
-  function saveCurrentOrder(status: OrderStatus = "Bozza") {
+  function resetQuoteDraft() {
+    setEditingOrderId(undefined);
+    setDraftQuoteNumber(makeQuoteNumber());
+    setParsed(null);
+    setQuoteItems([]);
+    setItemName("Stampa personalizzata");
+    setPricing(DEFAULT_PRICING);
+    setShippingMethod(DEFAULT_SHIPPING_METHOD);
+    setManualQuoteUnitPrice(undefined);
+    setCustomer(EMPTY_CUSTOMER);
+    setCustomerNumber("");
+    setNotes(DEFAULT_NOTES);
+    setView("nuovo");
+  }
+
+  function saveCurrentOrder(status?: OrderStatus) {
     const now = new Date();
+    const existingOrder = editingOrderId ? orders.find((order) => order.id === editingOrderId) : undefined;
     const order: Order = {
-      id: makeOrderId(),
-      quoteNumber: makeQuoteNumber(now),
-      createdAt: now.toISOString(),
-      status,
+      id: existingOrder?.id ?? makeOrderId(),
+      quoteNumber: existingOrder?.quoteNumber ?? draftQuoteNumber,
+      createdAt: existingOrder?.createdAt ?? now.toISOString(),
+      updatedAt: now.toISOString(),
+      status: status ?? existingOrder?.status ?? "Bozza",
       customer,
       customerNumber,
       fileName: itemName || quoteMetrics.fileName,
@@ -370,13 +405,17 @@ function App() {
       vatPercent: pricing.vatPercent,
       shippingMethod,
       shippingCost: shippingOption.cost,
+      manualUnitPrice: quoteItems.length ? undefined : manualQuoteUnitPrice,
+      manualPrice: undefined,
       netPrice: breakdown.netPrice,
       grossPrice: breakdown.grossPrice,
       metrics: quoteMetrics,
       items: quoteItems.length ? quoteItems : undefined,
       notes,
     };
-    setOrders((previous) => [order, ...previous]);
+    setOrders((previous) => (existingOrder ? previous.map((item) => (item.id === existingOrder.id ? order : item)) : [order, ...previous]));
+    setEditingOrderId(undefined);
+    setDraftQuoteNumber(makeQuoteNumber());
     setView("storico");
   }
 
@@ -386,12 +425,41 @@ function App() {
 
   function deleteOrder(orderId: string) {
     setOrders((previous) => previous.filter((order) => order.id !== orderId));
+    if (editingOrderId === orderId) {
+      resetQuoteDraft();
+    }
+  }
+
+  function loadOrderForEditing(order: Order) {
+    const restoredPricing = makePricingFromOrder(order);
+    const restoredItems = restoreOrderItems(order);
+    setEditingOrderId(order.id);
+    setDraftQuoteNumber(order.quoteNumber);
+    setCustomer(order.customer);
+    setCustomerNumber(order.customerNumber);
+    setItemName(order.fileName || order.metrics.fileName || "Preventivo");
+    setNotes(order.notes || DEFAULT_NOTES);
+    setPricing(restoredPricing);
+    setShippingMethod(order.shippingMethod ?? DEFAULT_SHIPPING_METHOD);
+    setQuoteItems(restoredItems);
+    setParsed({
+      metrics: order.metrics,
+      preview: { kind: "empty", message: "Preventivo salvato nello storico." },
+    });
+    setManualQuoteUnitPrice(
+      restoredItems.length
+        ? undefined
+        : normalizeManualUnitPrice(
+            order.manualUnitPrice ?? (order.manualPrice ? order.manualPrice / Math.max(1, order.quantity) : undefined) ?? getSavedOrderUnitPrice(order),
+          ),
+    );
+    setView("nuovo");
   }
 
   async function generateQuote() {
     const { openQuote } = await import("./lib/quote");
-    openQuote({
-      quoteNumber: makeQuoteNumber(),
+    await openQuote({
+      quoteNumber: activeQuoteNumber,
       customer,
       customerNumber,
       metrics: quoteMetrics,
@@ -406,7 +474,7 @@ function App() {
 
   async function generateOrderQuote(order: Order) {
     const { openOrderQuote } = await import("./lib/quote");
-    openOrderQuote(order);
+    await openOrderQuote(order);
   }
 
   function saveFrequentProduct() {
@@ -518,13 +586,18 @@ function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div>
-          <p className="eyebrow">Gestionale personale</p>
-          <h1>Ordini stampa 3D</h1>
+        <div className="brand-block">
+          <img className="brand-wordmark" src={BRAND_WORDMARK_SRC} alt="Artigiani del3d" />
+          <div className="brand-copy">
+            <p className="eyebrow">Gestionale preventivi</p>
+            <h1>Ordini stampa 3D</h1>
+            <span>Calcolo rapido, catalogo prodotti e PDF coordinati al brand.</span>
+          </div>
         </div>
         <div className="topbar-metrics">
           <MetricPill icon={<Archive size={17} />} label="Ordini" value={orders.length.toString()} />
-          <MetricPill icon={<Calculator size={17} />} label="Preventivo" value={formatCurrency(breakdown.grossPrice)} />
+          <MetricPill icon={<ReceiptText size={17} />} label="Numero" value={activeQuoteNumber} />
+          <MetricPill icon={<Calculator size={17} />} label="Totale" value={formatCurrency(breakdown.grossPrice)} />
         </div>
       </header>
 
@@ -542,6 +615,21 @@ function App() {
           Prodotti frequenti
         </button>
       </nav>
+
+      {editingOrder ? (
+        <section className="edit-banner">
+          <div>
+            <strong>Modifica preventivo {editingOrder.quoteNumber}</strong>
+            <span>
+              Stai lavorando sul preventivo salvato per {editingOrder.customer.name || "cliente senza nome"}. Il PDF rigenerato usera lo stesso numero.
+            </span>
+          </div>
+          <button className="secondary-button" onClick={resetQuoteDraft}>
+            <XCircle size={18} />
+            Nuovo preventivo
+          </button>
+        </section>
+      ) : null}
 
       {view === "nuovo" && (
         <section className="quote-builder">
@@ -833,12 +921,18 @@ function App() {
             <section className="panel action-panel">
               <button className="primary-button" onClick={() => void generateQuote()}>
                 <ReceiptText size={18} />
-                Crea PDF
+                {editingOrder ? "Rigenera PDF" : "Crea PDF"}
               </button>
-              <button className="secondary-button" onClick={() => saveCurrentOrder("Bozza")}>
+              <button className="secondary-button" onClick={() => saveCurrentOrder()}>
                 <Save size={18} />
-                Salva nello storico
+                {editingOrder ? "Aggiorna preventivo" : "Salva nello storico"}
               </button>
+              {editingOrder ? (
+                <button className="secondary-button" onClick={resetQuoteDraft}>
+                  <XCircle size={18} />
+                  Annulla modifica
+                </button>
+              ) : null}
             </section>
           </aside>
         </section>
@@ -851,16 +945,26 @@ function App() {
               <p className="eyebrow">Archivio</p>
               <h2>Storico ordini</h2>
             </div>
-            <div className="status-tabs" role="tablist" aria-label="Filtra ordini">
-              {(["Tutti", ...STATUSES] as const).map((status) => (
-                <button
-                  key={status}
-                  className={activeStatus === status ? "is-selected" : ""}
-                  onClick={() => setActiveStatus(status)}
-                >
-                  {status}
-                </button>
-              ))}
+            <div className="orders-tools">
+              <label className="search-field">
+                Cerca
+                <input
+                  placeholder="Cliente, numero o prodotto"
+                  value={orderSearch}
+                  onChange={(event) => setOrderSearch(event.target.value)}
+                />
+              </label>
+              <div className="status-tabs" role="tablist" aria-label="Filtra ordini">
+                {(["Tutti", ...STATUSES] as const).map((status) => (
+                  <button
+                    key={status}
+                    className={activeStatus === status ? "is-selected" : ""}
+                    onClick={() => setActiveStatus(status)}
+                  >
+                    {status}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -898,6 +1002,9 @@ function App() {
                     ))}
                   </select>
                   <div className="row-actions">
+                    <button title="Modifica preventivo" onClick={() => loadOrderForEditing(order)}>
+                      <Edit3 size={17} />
+                    </button>
                     <button title="Scarica preventivo PDF" onClick={() => void generateOrderQuote(order)}>
                       <FileText size={17} />
                     </button>
@@ -1467,6 +1574,57 @@ function calculateAutomaticProductPrice(product: FrequentProduct): PriceBreakdow
     color: product.color,
     finish: product.finish,
   });
+}
+
+function makePricingFromOrder(order: Order): PricingInputs {
+  return {
+    ...DEFAULT_PRICING,
+    materialKey: "pla",
+    quantity: Math.max(1, order.quantity),
+    manualMinutes: Math.max(1, Math.round(order.metrics.printTimeMinutes ?? DEFAULT_PRICING.manualMinutes)),
+    filamentGrams: Math.max(1, order.metrics.filamentGrams ?? DEFAULT_PRICING.filamentGrams),
+    machineRate: PRINTER_PROFILE.machineRate,
+    powerKw: order.averagePowerKw ?? PRINTER_PROFILE.defaultAveragePowerKw,
+    energyCostKwh: PRINTER_PROFILE.energyCostKwh,
+    marginPercent: 125,
+    includeVat: Boolean(order.includeVat),
+    vatPercent: order.vatPercent ?? DEFAULT_PRICING.vatPercent,
+    color: order.color || "Bianco",
+    finish: order.finish || "Standard",
+  };
+}
+
+function restoreOrderItems(order: Order): QuoteItem[] {
+  return (order.items ?? []).map((item) => ({
+    ...item,
+    id: item.id || makeOrderId(),
+    name: item.name || item.fileName || "Prodotto",
+    fileName: item.fileName || item.name || "Prodotto",
+    kind: item.kind ?? item.metrics?.kind ?? "unknown",
+    quantity: Math.max(1, item.quantity || 1),
+    manualMinutes: Math.max(1, item.manualMinutes || item.metrics?.printTimeMinutes || DEFAULT_PRICING.manualMinutes),
+    filamentGrams: Math.max(1, item.filamentGrams || item.metrics?.filamentGrams || DEFAULT_PRICING.filamentGrams),
+    color: item.color ?? order.color ?? "Bianco",
+    finish: item.finish ?? order.finish ?? "Standard",
+    metrics: {
+      ...item.metrics,
+      fileName: item.metrics?.fileName || item.fileName || item.name || "Prodotto",
+      fileSize: item.metrics?.fileSize ?? 0,
+      kind: item.metrics?.kind ?? item.kind ?? "unknown",
+      printTimeMinutes: item.manualMinutes || item.metrics?.printTimeMinutes || DEFAULT_PRICING.manualMinutes,
+      filamentGrams: item.filamentGrams || item.metrics?.filamentGrams || DEFAULT_PRICING.filamentGrams,
+      warnings: item.metrics?.warnings ?? [],
+    },
+  }));
+}
+
+function getSavedOrderUnitPrice(order: Order): number | undefined {
+  if (order.items?.length) {
+    return undefined;
+  }
+  const shippingCost = order.shippingCost ?? (order.shippingMethod ? getShippingOption(order.shippingMethod).cost : 0);
+  const productGrossPrice = Math.max(0, order.grossPrice - shippingCost);
+  return productGrossPrice / Math.max(1, order.quantity);
 }
 
 export default App;
