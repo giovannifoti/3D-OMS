@@ -1,4 +1,4 @@
-import type { MaterialKey, MaterialProfile, PriceBreakdown, PricingInputs, PrintMetrics, ShippingMethod } from "../types";
+import type { DiscountMode, MaterialKey, MaterialProfile, PriceBreakdown, PricingInputs, PrintMetrics, ShippingMethod } from "../types";
 
 export const MATERIALS: MaterialProfile[] = [
   { key: "pla", name: "PLA", costPerKg: 15.99, density: 1.24, diameterMm: 1.75, wastePercent: 8 },
@@ -29,9 +29,15 @@ export const SHIPPING_OPTIONS: Record<ShippingMethod, { label: string; shortLabe
     shortLabel: "Consegna a domicilio",
     cost: 8.5,
   },
+  local: {
+    label: "Consegna in zona",
+    shortLabel: "Zona gratis",
+    cost: 0,
+  },
 };
 
 export const DEFAULT_SHIPPING_METHOD: ShippingMethod = "inpost";
+export const DEFAULT_DISCOUNT_MODE: DiscountMode = "percent";
 
 export const DEFAULT_PRICING: PricingInputs = {
   materialKey: "pla",
@@ -153,6 +159,40 @@ export function applyShippingToBreakdown(
     grossPrice,
     unitPrice: grossPrice / Math.max(1, quantity),
   };
+}
+
+export function applyDiscountToBreakdown(
+  breakdown: PriceBreakdown,
+  discountMode: DiscountMode,
+  discountValue: number,
+  quantity: number,
+  pricing: Pick<PricingInputs, "includeVat" | "vatPercent">,
+): PriceBreakdown {
+  const discountGrossPrice = calculateDiscountAmount(breakdown.grossPrice, discountMode, discountValue);
+  if (!discountGrossPrice) {
+    return breakdown;
+  }
+  const vatRate = pricing.includeVat ? pricing.vatPercent / 100 : 0;
+  const discountNetPrice = vatRate ? roundTo(discountGrossPrice / (1 + vatRate), 2) : discountGrossPrice;
+  const netPrice = Math.max(0, roundTo(breakdown.netPrice - discountNetPrice, 2));
+  const grossPrice = Math.max(0, roundTo(breakdown.grossPrice - discountGrossPrice, 2));
+  return {
+    ...breakdown,
+    netPrice,
+    vatAmount: Math.max(0, roundTo(grossPrice - netPrice, 2)),
+    grossPrice,
+    unitPrice: grossPrice / Math.max(1, quantity),
+  };
+}
+
+export function calculateDiscountAmount(basePrice: number, discountMode: DiscountMode, discountValue: number): number {
+  const normalizedBasePrice = Math.max(0, Number.isFinite(basePrice) ? basePrice : 0);
+  const normalizedDiscountValue = Math.max(0, Number.isFinite(discountValue) ? discountValue : 0);
+  const rawDiscount =
+    discountMode === "percent"
+      ? normalizedBasePrice * (Math.min(100, normalizedDiscountValue) / 100)
+      : normalizedDiscountValue;
+  return roundTo(Math.min(normalizedBasePrice, rawDiscount), 2);
 }
 
 export function getShippingOption(shippingMethod: ShippingMethod) {

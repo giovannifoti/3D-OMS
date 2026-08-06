@@ -1,6 +1,6 @@
 import { jsPDF } from "jspdf";
 import { autoTable } from "jspdf-autotable";
-import type { Customer, Order, PriceBreakdown, PricingInputs, PrintMetrics, QuoteItem, ShippingMethod } from "../types";
+import type { Customer, DiscountMode, Order, PriceBreakdown, PricingInputs, PrintMetrics, QuoteItem, ShippingMethod } from "../types";
 import {
   DEFAULT_PRICING,
   PRINTER_PROFILE,
@@ -24,6 +24,9 @@ type QuotePayload = {
   baseBreakdown: PriceBreakdown;
   breakdown: PriceBreakdown;
   shippingMethod: ShippingMethod;
+  discountMode: DiscountMode;
+  discountValue: number;
+  discountAmount: number;
   items?: QuoteLinePayload[];
   notes: string;
 };
@@ -49,6 +52,10 @@ type PdfPayload = {
   shipping?: {
     label: string;
     cost: number;
+  };
+  discount?: {
+    label: string;
+    amount: number;
   };
   notes: string;
 };
@@ -121,13 +128,15 @@ export function createQuotePdfDocument(payload: QuotePayload, assets: PdfAssets 
       label: shipping.label,
       cost: shipping.cost,
     },
+    discount: getQuoteDiscount(payload.discountMode, payload.discountValue, payload.discountAmount),
     notes: payload.notes,
   }, assets);
 }
 
 export function createOrderQuotePdfDocument(order: Order, assets: PdfAssets = {}): jsPDF {
   const shipping = getSavedOrderShipping(order);
-  const productTotals = getSavedOrderProductTotals(order, shipping?.cost);
+  const discount = getSavedOrderDiscount(order);
+  const productTotals = getSavedOrderProductTotals(order, shipping?.cost, discount?.amount);
   const lines = order.items?.length
     ? buildSavedOrderLines(order)
     : [buildSavedOrderSingleLine(order, productTotals.netPrice)];
@@ -143,6 +152,7 @@ export function createOrderQuotePdfDocument(order: Order, assets: PdfAssets = {}
     includeVat: Boolean(order.includeVat),
     vatPercent: order.vatPercent ?? 22,
     shipping,
+    discount,
     notes: order.notes,
   }, assets);
 }
@@ -252,8 +262,18 @@ function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: 
   }
 
   let lastDetailY = payload.includeVat ? y + 14 : y + 7;
+  if (payload.discount) {
+    const discountY = lastDetailY + 7;
+    document.setFontSize(8.5);
+    document.setTextColor(...COLORS.muted);
+    document.text(cleanPdfText(payload.discount.label), x + 5, discountY);
+    document.setTextColor(...COLORS.text);
+    document.text(`- ${formatPdfCurrency(payload.discount.amount)}`, x + width - 5, discountY, { align: "right" });
+    lastDetailY = discountY;
+  }
+
   if (payload.shipping) {
-    const shippingY = payload.includeVat ? y + 21 : y + 14;
+    const shippingY = lastDetailY + 7;
     document.setFontSize(8.5);
     document.setTextColor(...COLORS.muted);
     document.text(cleanPdfText(payload.shipping.label), x + 5, shippingY);
@@ -262,7 +282,7 @@ function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: 
     lastDetailY = shippingY;
   }
 
-  const totalY = lastDetailY + (payload.shipping ? 11 : payload.includeVat ? 10 : 9);
+  const totalY = lastDetailY + 11;
   document.setDrawColor(...COLORS.blue);
   document.line(x + 5, totalY - 5, x + width - 5, totalY - 5);
   document.setFont("helvetica", "bold");
@@ -469,11 +489,39 @@ function getSavedOrderShipping(order: Order): PdfPayload["shipping"] {
   };
 }
 
-function getSavedOrderProductTotals(order: Order, shippingCost = 0): { netPrice: number; vatAmount: number } {
+function getQuoteDiscount(discountMode: DiscountMode, discountValue: number, discountAmount: number): PdfPayload["discount"] {
+  if (!discountAmount) {
+    return undefined;
+  }
+  return {
+    label: getDiscountLabel(discountMode, discountValue),
+    amount: discountAmount,
+  };
+}
+
+function getSavedOrderDiscount(order: Order): PdfPayload["discount"] {
+  if (!order.discountAmount) {
+    return undefined;
+  }
+  return {
+    label: getDiscountLabel(order.discountMode ?? "amount", order.discountValue ?? 0),
+    amount: order.discountAmount,
+  };
+}
+
+function getDiscountLabel(discountMode: DiscountMode, discountValue: number): string {
+  if (discountMode === "percent" && discountValue > 0) {
+    return `Sconto ${formatPdfNumber(discountValue)}%`;
+  }
+  return "Sconto";
+}
+
+function getSavedOrderProductTotals(order: Order, shippingCost = 0, discountAmount = 0): { netPrice: number; vatAmount: number } {
   const vatRate = order.includeVat ? (order.vatPercent ?? 22) / 100 : 0;
   const shippingNetPrice = vatRate ? shippingCost / (1 + vatRate) : shippingCost;
-  const productNetPrice = roundPdfMoney(order.netPrice - shippingNetPrice);
-  const productGrossPrice = roundPdfMoney(order.grossPrice - shippingCost);
+  const discountNetPrice = vatRate ? discountAmount / (1 + vatRate) : discountAmount;
+  const productNetPrice = roundPdfMoney(order.netPrice - shippingNetPrice + discountNetPrice);
+  const productGrossPrice = roundPdfMoney(order.grossPrice - shippingCost + discountAmount);
   return {
     netPrice: productNetPrice,
     vatAmount: roundPdfMoney(productGrossPrice - productNetPrice),
@@ -521,7 +569,7 @@ function getLastTableY(document: jsPDF): number {
 }
 
 function getTotalsHeight(payload: PdfPayload): number {
-  return 23 + (payload.includeVat ? 8 : 0) + (payload.shipping ? 8 : 0);
+  return 23 + (payload.includeVat ? 8 : 0) + (payload.discount ? 8 : 0) + (payload.shipping ? 8 : 0);
 }
 
 async function loadPdfAssets(): Promise<PdfAssets> {
@@ -557,6 +605,13 @@ function formatPdfCurrency(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(Number.isFinite(value) ? value : 0)} EUR`;
+}
+
+function formatPdfNumber(value: number): string {
+  return new Intl.NumberFormat("it-IT", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(value) ? value : 0);
 }
 
 function cleanPdfText(value: string): string {

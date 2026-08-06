@@ -26,13 +26,16 @@ import {
 } from "lucide-react";
 import { parsePrintFile } from "./lib/fileParsers";
 import {
+  DEFAULT_DISCOUNT_MODE,
   DEFAULT_SHIPPING_METHOD,
   DEFAULT_PRICING,
   PRINTER_PROFILE,
   SHIPPING_OPTIONS,
   SURCHARGES,
+  applyDiscountToBreakdown,
   applyManualUnitPriceToBreakdown,
   applyShippingToBreakdown,
+  calculateDiscountAmount,
   calculatePrice,
   formatCurrency,
   formatNumber,
@@ -44,6 +47,7 @@ import {
 import { loadOrders, loadProducts, makeOrderId, makeQuoteNumber, saveOrders, saveProducts } from "./lib/storage";
 import type {
   Customer,
+  DiscountMode,
   FrequentProduct,
   Order,
   OrderStatus,
@@ -85,6 +89,8 @@ function App() {
   const [itemName, setItemName] = useState("Stampa personalizzata");
   const [pricing, setPricing] = useState<PricingInputs>(DEFAULT_PRICING);
   const [shippingMethod, setShippingMethod] = useState<ShippingMethod>(DEFAULT_SHIPPING_METHOD);
+  const [discountMode, setDiscountMode] = useState<DiscountMode>(DEFAULT_DISCOUNT_MODE);
+  const [discountValue, setDiscountValue] = useState(0);
   const [manualQuoteUnitPrice, setManualQuoteUnitPrice] = useState<number | undefined>();
   const [customer, setCustomer] = useState<Customer>(EMPTY_CUSTOMER);
   const [customerNumber, setCustomerNumber] = useState("");
@@ -152,13 +158,17 @@ function App() {
     const totalQuantity = rows.length
       ? rows.reduce((total, row) => total + row.item.quantity, 0)
       : pricing.quantity;
+    const discountAmount = calculateDiscountAmount(baseBreakdown.grossPrice, discountMode, discountValue);
+    const discountedBreakdown = applyDiscountToBreakdown(baseBreakdown, discountMode, discountValue, totalQuantity, pricing);
     return {
       rows,
       automaticBreakdown,
       baseBreakdown,
-      breakdown: applyShippingToBreakdown(baseBreakdown, shippingMethod, totalQuantity, pricing),
+      discountAmount,
+      discountedBreakdown,
+      breakdown: applyShippingToBreakdown(discountedBreakdown, shippingMethod, totalQuantity, pricing),
     };
-  }, [manualQuoteUnitPrice, pricing, quoteItems, shippingMethod]);
+  }, [discountMode, discountValue, manualQuoteUnitPrice, pricing, quoteItems, shippingMethod]);
   const breakdown = pricedQuote.breakdown;
   const quoteTotals = useMemo(
     () => ({
@@ -171,6 +181,7 @@ function App() {
   );
   const selectedMaterial = getMaterial("pla");
   const shippingOption = getShippingOption(shippingMethod);
+  const discountLabel = discountMode === "percent" ? `Sconto ${formatNumber(discountValue, 2)}%` : "Sconto";
   const editingOrder = editingOrderId ? orders.find((order) => order.id === editingOrderId) : undefined;
   const activeQuoteNumber = editingOrder?.quoteNumber ?? draftQuoteNumber;
   const normalizedOrderSearch = orderSearch.trim().toLowerCase();
@@ -393,6 +404,8 @@ function App() {
     setItemName("Stampa personalizzata");
     setPricing(DEFAULT_PRICING);
     setShippingMethod(DEFAULT_SHIPPING_METHOD);
+    setDiscountMode(DEFAULT_DISCOUNT_MODE);
+    setDiscountValue(0);
     setManualQuoteUnitPrice(undefined);
     setCustomer(EMPTY_CUSTOMER);
     setCustomerNumber("");
@@ -424,6 +437,9 @@ function App() {
       vatPercent: pricing.vatPercent,
       shippingMethod,
       shippingCost: shippingOption.cost,
+      discountMode,
+      discountValue,
+      discountAmount: pricedQuote.discountAmount,
       manualUnitPrice: quoteItems.length ? undefined : manualQuoteUnitPrice,
       manualPrice: undefined,
       netPrice: breakdown.netPrice,
@@ -460,6 +476,8 @@ function App() {
     setNotes(order.notes || DEFAULT_NOTES);
     setPricing(restoredPricing);
     setShippingMethod(order.shippingMethod ?? DEFAULT_SHIPPING_METHOD);
+    setDiscountMode(order.discountMode ?? DEFAULT_DISCOUNT_MODE);
+    setDiscountValue(order.discountValue ?? 0);
     setQuoteItems(restoredItems);
     setParsed({
       metrics: order.metrics,
@@ -486,6 +504,9 @@ function App() {
       baseBreakdown: pricedQuote.baseBreakdown,
       breakdown,
       shippingMethod,
+      discountMode,
+      discountValue,
+      discountAmount: pricedQuote.discountAmount,
       items: pricedQuote.rows,
       notes,
     });
@@ -859,6 +880,7 @@ function App() {
                 <InfoRow label="Guadagno 125%" value={formatCurrency(breakdown.marginAmount)} />
                 {breakdown.colorSurcharge > 0 && <InfoRow label="Colore" value={formatCurrency(breakdown.colorSurcharge)} />}
                 {breakdown.finishSurcharge > 0 && <InfoRow label="Effetto pietra" value={formatCurrency(breakdown.finishSurcharge)} />}
+                {pricedQuote.discountAmount > 0 && <InfoRow label={discountLabel} value={`- ${formatCurrency(pricedQuote.discountAmount)}`} />}
                 <InfoRow label={shippingOption.label} value={formatCurrency(shippingOption.cost)} />
                 {!quoteItems.length && pricing.quantity > 1 && <InfoRow label="Prezzo unitario" value={formatCurrency(breakdown.unitPrice)} />}
               </div>
@@ -894,12 +916,50 @@ function App() {
                   />
                   Applica IVA {pricing.vatPercent}%
                 </label>
+                <div className="discount-field">
+                  <span>Sconto</span>
+                  <div className="discount-card">
+                    <div className="discount-mode" role="group" aria-label="Tipo di sconto">
+                      {(["percent", "amount"] as DiscountMode[]).map((mode) => (
+                        <button
+                          aria-pressed={discountMode === mode}
+                          className={discountMode === mode ? "is-selected" : ""}
+                          key={mode}
+                          type="button"
+                          onClick={() => {
+                            setDiscountMode(mode);
+                            setDiscountValue(0);
+                          }}
+                        >
+                          {mode === "percent" ? "Percentuale" : "Importo"}
+                        </button>
+                      ))}
+                    </div>
+                    {discountMode === "percent" ? (
+                      <NumberField
+                        label="Sconto %"
+                        min={0}
+                        step={1}
+                        value={discountValue}
+                        onChange={(value) => setDiscountValue(Math.min(100, Math.max(0, value)))}
+                      />
+                    ) : (
+                      <CurrencyField
+                        label="Sconto euro"
+                        placeholder="0,00"
+                        value={discountValue > 0 ? discountValue : undefined}
+                        onChange={(value) => setDiscountValue(value ?? 0)}
+                      />
+                    )}
+                    <InfoRow label="Sconto calcolato" value={formatCurrency(pricedQuote.discountAmount)} />
+                  </div>
+                </div>
                 <div className="shipping-field">
                   <span>Spedizione</span>
                   <div className="shipping-segmented" role="group" aria-label="Modalita di spedizione">
                     {(Object.keys(SHIPPING_OPTIONS) as ShippingMethod[]).map((method) => {
                       const option = getShippingOption(method);
-                      const ShippingIcon = method === "inpost" ? MapPin : Truck;
+                      const ShippingIcon = method === "home" ? Truck : MapPin;
                       return (
                         <button
                           aria-pressed={shippingMethod === method}
@@ -1015,6 +1075,7 @@ function App() {
                     <strong>{formatCurrency(order.grossPrice)}</strong>
                     <span>
                       {formatNumber(order.metrics.printTimeMinutes ?? 0)} min · {order.shippingMethod ? getShippingOption(order.shippingMethod).shortLabel : "Spedizione non salvata"}
+                      {order.discountAmount ? ` · sconto ${formatCurrency(order.discountAmount)}` : ""}
                     </span>
                   </div>
                   <select value={order.status} onChange={(event) => updateOrderStatus(order.id, event.target.value as OrderStatus)}>
@@ -1672,7 +1733,7 @@ function getSavedOrderUnitPrice(order: Order): number | undefined {
     return undefined;
   }
   const shippingCost = order.shippingCost ?? (order.shippingMethod ? getShippingOption(order.shippingMethod).cost : 0);
-  const productGrossPrice = Math.max(0, order.grossPrice - shippingCost);
+  const productGrossPrice = Math.max(0, order.grossPrice - shippingCost + (order.discountAmount ?? 0));
   return productGrossPrice / Math.max(1, order.quantity);
 }
 
