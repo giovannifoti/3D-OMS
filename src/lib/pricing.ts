@@ -100,7 +100,7 @@ export function suggestPricingFromMetrics(
     machineRate: PRINTER_PROFILE.machineRate,
     powerKw: previous.powerKw || PRINTER_PROFILE.defaultAveragePowerKw,
     energyCostKwh: PRINTER_PROFILE.energyCostKwh,
-    color: metrics.filaments && metrics.filaments.length > 1 ? "Colore" : previous.color,
+    color: hasMultipleUsedFilaments(metrics) ? "Colore" : previous.color,
     manualMinutes: Math.max(5, Math.round(metrics.printTimeMinutes ?? previous.manualMinutes)),
     filamentGrams: roundTo(Math.max(1, filamentGrams), 1),
   };
@@ -126,6 +126,16 @@ function gramsFromFilamentUsages(metrics: PrintMetrics, material: MaterialProfil
   }, 0);
 
   return total > 0 ? total : undefined;
+}
+
+function hasMultipleUsedFilaments(metrics: PrintMetrics): boolean {
+  return (metrics.filaments ?? []).filter((filament) =>
+    Boolean(
+      (Number.isFinite(filament.grams) && filament.grams)
+        || (Number.isFinite(filament.millimeters) && filament.millimeters)
+        || (Number.isFinite(filament.meters) && filament.meters),
+    ),
+  ).length > 1;
 }
 
 export function calculatePrice(inputs: PricingInputs): PriceBreakdown {

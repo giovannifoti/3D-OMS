@@ -329,14 +329,8 @@ function updateGcodeMetadata(line: string, metrics: PrintMetrics): void {
   }
   const lower = clean.toLowerCase();
 
-  const timeSeconds = clean.match(/^\s*;?\s*time\s*:\s*(\d+)/i)?.[1];
-  if (timeSeconds && !metrics.printTimeMinutes) {
-    metrics.printTimeMinutes = Number(timeSeconds) / 60;
-  }
-
-  if (!metrics.printTimeMinutes && (/(estimated|print|printing|total).*time|tempo/i.test(clean) || /printing_time|print_time/i.test(clean))) {
-    const value = getAssignedValue(clean);
-    const minutes = parseDurationToMinutes(value);
+  if (!metrics.printTimeMinutes) {
+    const minutes = parsePrintTimeMetadata(clean);
     if (minutes) {
       metrics.printTimeMinutes = minutes;
     }
@@ -350,6 +344,50 @@ function updateGcodeMetadata(line: string, metrics: PrintMetrics): void {
   if (!metrics.detectedPrinter && printer) {
     metrics.detectedPrinter = printer.trim();
   }
+}
+
+function parsePrintTimeMetadata(line: string): number | undefined {
+  const key = getMetadataKey(line);
+  const normalizedKey = normalizeMetadataKey(key);
+  const assigned = getAssignedValue(line);
+
+  const gcodeTimeSeconds = line.match(/^\s*;?\s*time\s*:\s*(\d+(?:[.,]\d+)?)/i)?.[1];
+  if (gcodeTimeSeconds && normalizedKey === "time") {
+    return parseLocaleNumber(gcodeTimeSeconds) / 60;
+  }
+
+  if (!isPrintTimeKey(normalizedKey, line)) {
+    return undefined;
+  }
+
+  const duration = parseDurationToMinutes(assigned);
+  if (duration) {
+    return duration;
+  }
+
+  const values = parseNumberList(assigned);
+  if (values.length === 1 && values[0] > 0) {
+    return values[0] / 60;
+  }
+
+  return undefined;
+}
+
+function isPrintTimeKey(normalizedKey: string, line: string): boolean {
+  if (/(elapsed|remaining|left|pause|cool|fan|travel|layer|filament|material)/.test(normalizedKey)) {
+    return false;
+  }
+
+  const normalizedLine = normalizeMetadataKey(line);
+  return Boolean(
+    /^(time|print_time|printing_time|print_duration|estimated_print_time|estimated_printing_time|total_print_time|total_printing_time|normal_print_time|silent_print_time|prediction)$/.test(normalizedKey)
+      || /(^|_)prediction($|_)/.test(normalizedKey)
+      || /(^|_)build_time$/.test(normalizedKey)
+      || /(^|_)(estimated|estimate|total|normal|silent)?_?print(ing)?_time/.test(normalizedKey)
+      || /(^|_)(estimated|estimate|total)_time/.test(normalizedKey)
+      || /estimated_printing_time|estimated_time|total_estimated_time|print_duration/.test(normalizedLine)
+      || /^tempo(_di)?_stampa(_stimato)?$/.test(normalizedKey),
+  );
 }
 
 async function merge3mfArchiveMetadata(zip: JSZip, metrics: PrintMetrics): Promise<void> {
@@ -373,6 +411,9 @@ function mergeSlicerTextMetadata(text: string, metrics: PrintMetrics): void {
     updateGcodeMetadata(line, metrics);
   }
 
+  mergeStructuredSlicerAttributes(text, metrics);
+  mergeSlicerPlateMetadata(text, metrics);
+
   for (const match of text.matchAll(/(?:name|key)\s*=\s*["']([^"']+)["'][^>]*\bvalue\s*=\s*["']([^"']*)["']/gi)) {
     updateGcodeMetadata(`${match[1]} = ${match[2]}`, metrics);
   }
@@ -380,6 +421,190 @@ function mergeSlicerTextMetadata(text: string, metrics: PrintMetrics): void {
   for (const match of text.matchAll(/<metadata[^>]*name\s*=\s*["']([^"']+)["'][^>]*>([^<]+)<\/metadata>/gi)) {
     updateGcodeMetadata(`${match[1]} = ${match[2]}`, metrics);
   }
+}
+
+function mergeStructuredSlicerAttributes(text: string, metrics: PrintMetrics): void {
+  const filamentNodes = Array.from(text.matchAll(/<\s*(?:filament|extruder)\b[^>]*>/gi))
+    .map((match) => parseXmlLikeAttributes(match[0]))
+    .filter((attributes) => Object.keys(attributes).length > 0);
+
+  if (filamentNodes.length) {
+    const filaments = ensureFilamentUsages(metrics, filamentNodes.length);
+    filamentNodes.forEach((attributes, index) => {
+      const filament = filaments[index];
+      const material = firstAttribute(attributes, ["type", "material", "filament_type"]);
+      const color = firstAttribute(attributes, ["color", "colour", "filament_color", "filament_colour"]);
+      if (material) {
+        filament.material = material;
+      }
+      if (color) {
+        filament.color = color;
+      }
+      const grams = firstNumericAttribute(attributes, ["used_g", "filament_used_g"]);
+      const meters = firstNumericAttribute(attributes, ["used_m", "filament_used_m"]);
+      const millimeters = firstNumericAttribute(attributes, ["used_mm", "filament_used_mm"]);
+      if (grams !== undefined) {
+        setFilamentUsageField(filament, "grams", grams);
+      }
+      if (meters !== undefined) {
+        setFilamentUsageField(filament, "meters", meters);
+      }
+      if (millimeters !== undefined) {
+        setFilamentUsageField(filament, "millimeters", millimeters);
+      }
+    });
+  }
+
+  for (const match of text.matchAll(/<\s*[^!?/][^>]*>/g)) {
+    const attributes = parseXmlLikeAttributes(match[0]);
+    const metadataKey = firstAttribute(attributes, ["key", "name"]);
+    const metadataValue = firstAttribute(attributes, ["value"]);
+    if (metadataKey && metadataValue) {
+      updateGcodeMetadata(`${metadataKey} = ${metadataValue}`, metrics);
+    }
+
+    if (!metrics.printTimeMinutes) {
+      const printTime = firstAttribute(attributes, ["print_time", "printing_time", "estimated_print_time", "estimated_printing_time", "prediction"]);
+      if (printTime) {
+        const minutes = parsePrintTimeMetadata(`print_time = ${printTime}`);
+        if (minutes) {
+          metrics.printTimeMinutes = minutes;
+        }
+      }
+    }
+
+    const totalGrams = firstAttribute(attributes, ["filament_used_g", "total_filament_used_g", "material_used_g"]);
+    if (totalGrams) {
+      updateGcodeMetadata(`filament_used_g = ${totalGrams}`, metrics);
+    }
+    const totalMeters = firstAttribute(attributes, ["filament_used_m", "total_filament_used_m", "material_used_m"]);
+    if (totalMeters) {
+      updateGcodeMetadata(`filament_used_m = ${totalMeters}`, metrics);
+    }
+    const totalMillimeters = firstAttribute(attributes, ["filament_used_mm", "total_filament_used_mm", "material_used_mm"]);
+    if (totalMillimeters) {
+      updateGcodeMetadata(`filament_used_mm = ${totalMillimeters}`, metrics);
+    }
+  }
+}
+
+function mergeSlicerPlateMetadata(text: string, metrics: PrintMetrics): void {
+  const blocks = Array.from(text.matchAll(/<\s*(?:plate|print|statistics|slice_info)\b[^>]*>[\s\S]*?<\/\s*(?:plate|print|statistics|slice_info)\s*>/gi));
+  for (const match of blocks) {
+    const values = collectMetadataValues(match[0]);
+    const timeValue = firstMetadataValue(values, [
+      "prediction",
+      "print_time",
+      "printing_time",
+      "estimated_time",
+      "estimated_print_time",
+      "estimated_printing_time",
+      "normal_print_time",
+      "total_estimated_time",
+    ]);
+
+    if (!metrics.printTimeMinutes && timeValue) {
+      const minutes = parsePrintTimeMetadata(`print_time = ${timeValue}`);
+      if (minutes) {
+        metrics.printTimeMinutes = minutes;
+      }
+    }
+
+    const hasPlateTime = Boolean(timeValue);
+    const weightValue = firstMetadataValue(values, [
+      "weight",
+      "total_weight",
+      "filament_weight",
+      "filament_weight_g",
+      "filament_used_g",
+      "total_filament_used_g",
+      "material_used_g",
+    ]);
+    if (hasPlateTime && weightValue) {
+      const weights = parseNumberList(weightValue).filter((value) => value > 0);
+      if (weights.length) {
+        mergeFilamentUsageValues(metrics, "grams", weights, weights.length === 1);
+      }
+    }
+
+    const lengthMmValue = firstMetadataValue(values, ["length_mm", "filament_length_mm", "filament_used_mm", "total_filament_used_mm"]);
+    if (hasPlateTime && lengthMmValue) {
+      const lengths = parseNumberList(lengthMmValue);
+      if (lengths.length) {
+        mergeFilamentUsageValues(metrics, "millimeters", lengths, lengths.length === 1);
+      }
+    }
+
+    const lengthMValue = firstMetadataValue(values, ["length", "length_m", "filament_length", "filament_length_m", "filament_used_m", "total_filament_used_m"]);
+    if (hasPlateTime && lengthMValue) {
+      const lengths = parseNumberList(lengthMValue);
+      if (lengths.length) {
+        mergeFilamentUsageValues(metrics, "meters", lengths, lengths.length === 1);
+      }
+    }
+  }
+}
+
+function collectMetadataValues(block: string): Map<string, string[]> {
+  const values = new Map<string, string[]>();
+
+  for (const tag of block.matchAll(/<\s*[^!?/][^>]*>/g)) {
+    const attributes = parseXmlLikeAttributes(tag[0]);
+    const key = firstAttribute(attributes, ["key", "name"]);
+    const value = firstAttribute(attributes, ["value"]);
+    if (key && value) {
+      addMetadataValue(values, key, value);
+    }
+    for (const [attribute, attributeValue] of Object.entries(attributes)) {
+      if (!["key", "name", "value", "id", "index"].includes(attribute) && attributeValue) {
+        addMetadataValue(values, attribute, attributeValue);
+      }
+    }
+  }
+
+  return values;
+}
+
+function addMetadataValue(values: Map<string, string[]>, key: string, value: string): void {
+  const normalizedKey = normalizeMetadataKey(key);
+  values.set(normalizedKey, [...(values.get(normalizedKey) ?? []), value]);
+}
+
+function firstMetadataValue(values: Map<string, string[]>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const found = values.get(normalizeMetadataKey(key))?.find(Boolean);
+    if (found) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
+function parseXmlLikeAttributes(tag: string): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  for (const match of tag.matchAll(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    attributes[normalizeMetadataKey(match[1])] = cleanMetadataValue(match[2] ?? match[3]);
+  }
+  return attributes;
+}
+
+function firstAttribute(attributes: Record<string, string>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = attributes[normalizeMetadataKey(key)];
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function firstNumericAttribute(attributes: Record<string, string>, keys: string[]): number | undefined {
+  const value = firstAttribute(attributes, keys);
+  if (!value) {
+    return undefined;
+  }
+  const numbers = parseNumberList(value);
+  return numbers.find((number) => number > 0);
 }
 
 function merge3mfModelMetadata(document: Document, metrics: PrintMetrics): void {
@@ -432,34 +657,55 @@ function parseFilamentTextValues(line: string, keyPatterns: RegExp[]): string[] 
 
 function parseFilamentUsageValues(line: string): { unit: "grams" | "meters" | "millimeters"; values: number[]; isTotal: boolean } | undefined {
   const key = getMetadataKey(line).toLowerCase();
+  const normalizedKey = normalizeMetadataKey(key);
   const lower = line.toLowerCase();
-  const context = `${key} ${lower}`;
-  if (!/(filament|filamento|used_filament|total_filament)/i.test(context)) {
-    return undefined;
-  }
-  if (/(filament|filamento)(?:_|\s|-)?(?:type|settings|colou?r)\b/i.test(context)) {
+  if (!isFilamentUsageKey(normalizedKey, lower)) {
     return undefined;
   }
 
   const assigned = getAssignedValue(line);
   const assignedLower = assigned.toLowerCase();
-  const unit = detectFilamentUnit(context, assignedLower);
+  const unit = detectFilamentUnit(normalizedKey, assignedLower);
   if (!unit) {
     return undefined;
   }
 
   const values = parseNumberList(assigned);
-  return values.length ? { unit, values, isTotal: /\b(total|totale)\b/i.test(context) } : undefined;
+  return values.length ? { unit, values, isTotal: /\b(total|totale)\b/i.test(`${normalizedKey} ${lower}`) } : undefined;
 }
 
-function detectFilamentUnit(context: string, value: string): "grams" | "meters" | "millimeters" | undefined {
-  if (/\[mm\]|(?:^|[\s_-])mm(?:$|[\s_-])|millimeters?|millimetri|used_mm|length_mm|filament_mm/.test(context) || /[0-9][0-9.,]*\s*mm\b/.test(value)) {
+function isFilamentUsageKey(normalizedKey: string, lowerLine: string): boolean {
+  if (
+    /(start|end|custom|change|load|unload|retract|retraction|wipe|flush|purge|prime|cool|fan|temperature|temp|speed|volumetric|diameter|density|cost|price|vendor|note|preset|setting|profile|colour|color|type|gcode)/.test(normalizedKey)
+  ) {
+    return false;
+  }
+
+  return Boolean(
+    /^used_(g|m|mm)$/.test(normalizedKey)
+      || /^filament_used(_(g|m|mm|grams?|meters?|millimeters?))?$/.test(normalizedKey)
+      || /^total_filament_used(_(g|m|mm|grams?|meters?|millimeters?))?$/.test(normalizedKey)
+      || /^filament_weight_(g|grams?)$/.test(normalizedKey)
+      || /^total_filament_weight_(g|grams?)$/.test(normalizedKey)
+      || /^filament_length_(m|mm|meters?|millimeters?)$/.test(normalizedKey)
+      || /^total_filament_length_(m|mm|meters?|millimeters?)$/.test(normalizedKey)
+      || /^material_used(_(g|m|mm|grams?|meters?|millimeters?))?$/.test(normalizedKey)
+      || /filament_used|filamento_usato|filament_usage|filament_consumed|used_filament|total_filament_used|material_used/.test(normalizedKey)
+      || /\b(?:total\s+)?(?:filament|filamento)\s+weight\b.*\bg\b/i.test(lowerLine)
+      || /\b(?:total\s+)?(?:filament|filamento)\s+length\b.*\b(?:m|mm)\b/i.test(lowerLine)
+      || /\b(?:filament|filamento)\s+used\b/i.test(lowerLine)
+      || /\bfilamento\s+usato\b/i.test(lowerLine),
+  );
+}
+
+function detectFilamentUnit(normalizedKey: string, value: string): "grams" | "meters" | "millimeters" | undefined {
+  if (/\[mm\]|(?:^|_)mm(?:$|_)|millimeters?|millimetri|used_mm|length_mm/.test(normalizedKey) || /[0-9][0-9.,]*\s*mm\b/.test(value)) {
     return "millimeters";
   }
-  if (/\[g\]|(?:^|[\s_-])g(?:$|[\s_-])|grams?|grammi|weight|used_g|filament_g|filament_weight|total_filament_used_g/.test(context) || /[0-9][0-9.,]*\s*g\b/.test(value)) {
+  if (/\[g\]|(?:^|_)g(?:$|_)|grams?|grammi|weight|used_g|filament_weight|total_filament_used_g/.test(normalizedKey) || /[0-9][0-9.,]*\s*g\b/.test(value)) {
     return "grams";
   }
-  if (/\[m\]|(?:^|[\s_-])m(?:$|[\s_-])|meters?|metri|used_m|filament_m/.test(context) || /[0-9][0-9.,]*\s*m\b/.test(value)) {
+  if (/\[m\]|(?:^|_)m(?:$|_)|meters?|metri|used_m|length_m/.test(normalizedKey) || /[0-9][0-9.,]*\s*m\b/.test(value)) {
     return "meters";
   }
   return undefined;
@@ -721,8 +967,18 @@ function cleanMetadataValue(value: string | undefined): string {
     .replace(/\s+/g, " ");
 }
 
+function normalizeMetadataKey(value: string): string {
+  const clean = cleanMetadataValue(value).replace(/([a-z0-9])([A-Z])/g, "$1_$2");
+  return clean
+    .toLowerCase()
+    .replace(/^\s*;\s*/, "")
+    .replace(/\[([^\]]+)\]/g, "_$1")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 function hasPrintEstimate(metrics: PrintMetrics): boolean {
-  return Boolean(metrics.printTimeMinutes || metrics.filamentGrams || metrics.filamentMm || metrics.filamentMeters || metrics.filaments?.length);
+  return Boolean(metrics.printTimeMinutes || metrics.filamentGrams || metrics.filamentMm || metrics.filamentMeters || metrics.volumeCm3);
 }
 
 function roundMetric(value: number, digits: number): number {
