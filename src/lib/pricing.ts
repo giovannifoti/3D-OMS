@@ -78,15 +78,21 @@ export function suggestPricingFromMetrics(
   previous: PricingInputs = DEFAULT_PRICING,
 ): PricingInputs {
   const selectedMaterial = getMaterial("pla");
-  const filamentFromLength = metrics.filamentMm
-    ? gramsFromFilamentMm(metrics.filamentMm, selectedMaterial)
-    : undefined;
-  const filamentFromMeters = metrics.filamentMeters
-    ? gramsFromFilamentMm(metrics.filamentMeters * 1000, selectedMaterial)
-    : undefined;
+  const filamentFromLength = metrics.filamentMm ? gramsFromFilamentMm(metrics.filamentMm, selectedMaterial) : undefined;
+  const filamentFromMeters = metrics.filamentMeters ? gramsFromFilamentMm(metrics.filamentMeters * 1000, selectedMaterial) : undefined;
+  const filamentFromMulticolor = gramsFromFilamentUsages(metrics, selectedMaterial);
   const filamentFromVolume = metrics.volumeCm3
     ? gramsFromVolume(metrics.volumeCm3, selectedMaterial) * 0.45
     : undefined;
+  const exactFilamentCandidates = [
+    metrics.filamentGrams,
+    filamentFromMulticolor,
+    filamentFromLength,
+    filamentFromMeters,
+  ].filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+  const filamentGrams = exactFilamentCandidates.length
+    ? Math.max(...exactFilamentCandidates)
+    : filamentFromVolume ?? previous.filamentGrams;
 
   return {
     ...previous,
@@ -94,12 +100,32 @@ export function suggestPricingFromMetrics(
     machineRate: PRINTER_PROFILE.machineRate,
     powerKw: previous.powerKw || PRINTER_PROFILE.defaultAveragePowerKw,
     energyCostKwh: PRINTER_PROFILE.energyCostKwh,
+    color: metrics.filaments && metrics.filaments.length > 1 ? "Colore" : previous.color,
     manualMinutes: Math.max(5, Math.round(metrics.printTimeMinutes ?? previous.manualMinutes)),
-    filamentGrams: roundTo(
-      Math.max(1, metrics.filamentGrams ?? filamentFromLength ?? filamentFromMeters ?? filamentFromVolume ?? previous.filamentGrams),
-      1,
-    ),
+    filamentGrams: roundTo(Math.max(1, filamentGrams), 1),
   };
+}
+
+function gramsFromFilamentUsages(metrics: PrintMetrics, material: MaterialProfile): number | undefined {
+  const filaments = metrics.filaments ?? [];
+  if (!filaments.length) {
+    return undefined;
+  }
+
+  const total = filaments.reduce((sum, filament) => {
+    if (Number.isFinite(filament.grams) && filament.grams) {
+      return sum + filament.grams;
+    }
+    if (Number.isFinite(filament.millimeters) && filament.millimeters) {
+      return sum + gramsFromFilamentMm(filament.millimeters, material);
+    }
+    if (Number.isFinite(filament.meters) && filament.meters) {
+      return sum + gramsFromFilamentMm(filament.meters * 1000, material);
+    }
+    return sum;
+  }, 0);
+
+  return total > 0 ? total : undefined;
 }
 
 export function calculatePrice(inputs: PricingInputs): PriceBreakdown {

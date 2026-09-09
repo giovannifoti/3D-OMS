@@ -49,6 +49,7 @@ export type PrintMetrics = {
   filamentGrams?: number;
   filamentMeters?: number;
   filamentMm?: number;
+  filaments?: FilamentUsage[];
   volumeCm3?: number;
   layerCount?: number;
   boundingBox?: BoxSize;
@@ -132,6 +133,16 @@ export type ShippingMethod = "inpost" | "home" | "local";
 
 export type DiscountMode = "percent" | "amount";
 
+export type FilamentUsage = {
+  index: number;
+  label: string;
+  grams?: number;
+  meters?: number;
+  millimeters?: number;
+  material?: string;
+  color?: string;
+};
+
 export type Customer = {
   name: string;
   email: string;
@@ -188,6 +199,7 @@ export type FrequentProduct = {
   boundingBox?: BoxSize;
   layerCount?: number;
   volumeCm3?: number;
+  filaments?: FilamentUsage[];
   warnings?: string[];
   defaultMinutes: number;
   defaultGrams: number;

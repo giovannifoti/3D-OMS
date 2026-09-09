@@ -3,6 +3,7 @@ import type {
   Bounds,
   BoxSize,
   EmptyPreview,
+  FilamentUsage,
   MeshPreview,
   ParsedFile,
   PrintMetrics,
@@ -30,6 +31,12 @@ type ObjectNode = {
 };
 
 type Matrix3mf = number[];
+
+type Extracted3mfGeometry = {
+  vertices: number[];
+  indices: number[];
+  bounds: Bounds;
+};
 
 const IDENTITY_MATRIX: Matrix3mf = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
 
@@ -63,10 +70,13 @@ function parseGcodeText(
   const segments: ToolpathSegment[] = [];
   const bounds = createEmptyBounds();
   const pos: Position = { x: 0, y: 0, z: 0, e: 0 };
+  const extruderPositions = new Map<string, number>([["0", 0]]);
+  const filamentByToolMm = new Map<string, number>();
   const zLevels = new Set<string>();
   let isAbsolute = true;
   let isExtruderAbsolute = true;
   let totalExtrudedMm = 0;
+  let currentTool = "0";
   let layer = 0;
   let lastZKey = "";
   let skippedSegments = 0;
@@ -98,12 +108,22 @@ function parseGcodeText(
       continue;
     }
 
+    const toolChange = code.match(/^T(\d+)\b/);
+    if (toolChange) {
+      currentTool = toolChange[1];
+      pos.e = extruderPositions.get(currentTool) ?? 0;
+      continue;
+    }
+
     if (code.startsWith("G92")) {
       const params = parseGcodeParams(command);
       pos.x = params.X ?? pos.x;
       pos.y = params.Y ?? pos.y;
       pos.z = params.Z ?? pos.z;
-      pos.e = params.E ?? pos.e;
+      if (params.E !== undefined) {
+        pos.e = params.E;
+        extruderPositions.set(currentTool, params.E);
+      }
       continue;
     }
 
@@ -124,14 +144,15 @@ function parseGcodeText(
     }
 
     const hasExtrusion = params.E !== undefined;
+    const currentExtruderPosition = extruderPositions.get(currentTool) ?? pos.e;
     const nextE = hasExtrusion
       ? isExtruderAbsolute
-        ? params.E ?? pos.e
-        : pos.e + (params.E ?? 0)
-      : pos.e;
+        ? params.E ?? currentExtruderPosition
+        : currentExtruderPosition + (params.E ?? 0)
+      : currentExtruderPosition;
     const extrudedDelta = hasExtrusion
       ? isExtruderAbsolute
-        ? Math.max(0, nextE - pos.e)
+        ? Math.max(0, nextE - currentExtruderPosition)
         : Math.max(0, params.E ?? 0)
       : 0;
     const moved = next.x !== pos.x || next.y !== pos.y || next.z !== pos.z;
@@ -156,18 +177,22 @@ function parseGcodeText(
         skippedSegments += 1;
       }
       totalExtrudedMm += extrudedDelta;
+      filamentByToolMm.set(currentTool, (filamentByToolMm.get(currentTool) ?? 0) + extrudedDelta);
     }
 
     pos.x = next.x;
     pos.y = next.y;
     pos.z = next.z;
     pos.e = nextE;
+    extruderPositions.set(currentTool, nextE);
   }
 
-  if (!metrics.filamentMm && totalExtrudedMm > 0) {
-    metrics.filamentMm = totalExtrudedMm;
-    metrics.filamentMeters = totalExtrudedMm / 1000;
+  if (totalExtrudedMm > 0) {
+    setFilamentLength(metrics, totalExtrudedMm);
+    mergeToolpathFilaments(metrics, filamentByToolMm);
   }
+
+  normalizeFilamentMetrics(metrics);
 
   if (zLevels.size > 0) {
     metrics.layerCount = zLevels.size;
@@ -199,11 +224,24 @@ async function parse3mf(file: File): Promise<ParsedFile> {
 
   try {
     const zip = await JSZip.loadAsync(await file.arrayBuffer());
-    const modelFile = Object.values(zip.files).find(
-      (entry) => !entry.dir && /(^|\/)3dmodel\.model$/i.test(entry.name),
-    ) ?? Object.values(zip.files).find((entry) => !entry.dir && /\.model$/i.test(entry.name));
+    await merge3mfArchiveMetadata(zip, metrics);
 
-    if (!modelFile) {
+    const modelFiles = Object.values(zip.files).filter((entry) => !entry.dir && /\.model$/i.test(entry.name));
+    const preferredModelFile = modelFiles.find(
+      (entry) => !entry.dir && /(^|\/)3dmodel\.model$/i.test(entry.name),
+    );
+    const orderedModelFiles = preferredModelFile
+      ? [preferredModelFile, ...modelFiles.filter((entry) => entry !== preferredModelFile)]
+      : modelFiles;
+
+    if (!orderedModelFiles.length) {
+      normalizeFilamentMetrics(metrics);
+      if (hasPrintEstimate(metrics)) {
+        return {
+          metrics,
+          preview: { kind: "empty", message: "Dati di stampa letti dal 3MF." },
+        };
+      }
       return {
         metrics: {
           ...metrics,
@@ -213,27 +251,18 @@ async function parse3mf(file: File): Promise<ParsedFile> {
       };
     }
 
-    const xml = await modelFile.async("string");
-    const document = new DOMParser().parseFromString(xml, "application/xml");
-    const modelElement = firstElement(document, "model");
-    const unitScale = unitToMm(modelElement?.getAttribute("unit"));
-    const objects = parse3mfObjects(document, unitScale);
-    const buildItems = elements(document, "item").filter((item) => item.parentElement?.tagName.toLowerCase().endsWith("build"));
-    const vertices: number[] = [];
-    const indices: number[] = [];
-    const bounds = createEmptyBounds();
-
-    if (buildItems.length) {
-      for (const item of buildItems) {
-        const objectId = item.getAttribute("objectid");
-        if (!objectId) {
-          continue;
-        }
-        appendObjectMesh(objectId, objects, [parseTransform(item.getAttribute("transform"))], vertices, indices, bounds);
+    let bestGeometry: Extracted3mfGeometry | undefined;
+    for (const modelFile of orderedModelFiles) {
+      const xml = await modelFile.async("string");
+      const document = new DOMParser().parseFromString(xml, "application/xml");
+      if (elements(document, "parsererror").length) {
+        continue;
       }
-    } else {
-      for (const objectId of objects.keys()) {
-        appendObjectMesh(objectId, objects, [], vertices, indices, bounds);
+
+      merge3mfModelMetadata(document, metrics);
+      const geometry = extract3mfGeometry(document);
+      if (!bestGeometry || geometry.vertices.length > bestGeometry.vertices.length) {
+        bestGeometry = geometry;
       }
     }
 
@@ -243,11 +272,24 @@ async function parse3mf(file: File): Promise<ParsedFile> {
       mergeGcodeMetrics(metrics, embedded.metrics);
     }
 
+    normalizeFilamentMetrics(metrics);
+
+    const vertices = bestGeometry?.vertices ?? [];
+    const indices = bestGeometry?.indices ?? [];
+    const bounds = bestGeometry?.bounds ?? createEmptyBounds();
+
     if (!vertices.length || !indices.length) {
-      metrics.warnings.push("Geometria non trovata nel 3MF. Il file potrebbe contenere solo impostazioni di slicing.");
+      if (!hasPrintEstimate(metrics)) {
+        metrics.warnings.push("Geometria non trovata nel 3MF. Il file potrebbe contenere solo impostazioni di slicing.");
+      }
       return {
         metrics,
-        preview: { kind: "empty", message: "Nessuna geometria disponibile." },
+        preview: {
+          kind: "empty",
+          message: hasPrintEstimate(metrics)
+            ? "Dati di stampa letti dal 3MF."
+            : "Nessuna geometria disponibile.",
+        },
       };
     }
 
@@ -282,50 +324,410 @@ async function parse3mf(file: File): Promise<ParsedFile> {
 
 function updateGcodeMetadata(line: string, metrics: PrintMetrics): void {
   const clean = line.trim();
+  if (!clean) {
+    return;
+  }
   const lower = clean.toLowerCase();
 
-  const timeSeconds = clean.match(/;\s*time\s*:\s*(\d+)/i)?.[1];
+  const timeSeconds = clean.match(/^\s*;?\s*time\s*:\s*(\d+)/i)?.[1];
   if (timeSeconds && !metrics.printTimeMinutes) {
     metrics.printTimeMinutes = Number(timeSeconds) / 60;
   }
 
-  if (!metrics.printTimeMinutes && /(estimated|print|printing|total).*time|tempo/i.test(clean)) {
-    const value = clean.split(/[:=]/).slice(1).join(":").trim();
+  if (!metrics.printTimeMinutes && (/(estimated|print|printing|total).*time|tempo/i.test(clean) || /printing_time|print_time/i.test(clean))) {
+    const value = getAssignedValue(clean);
     const minutes = parseDurationToMinutes(value);
     if (minutes) {
       metrics.printTimeMinutes = minutes;
     }
   }
 
-  if (lower.includes("filament") || lower.includes("filamento")) {
-    const grams = clean.match(/(?:filament|filamento).*?(?:\[g\]|grams?|g)\s*[=:]?\s*([0-9]+(?:[.,][0-9]+)?)/i)
-      ?? clean.match(/([0-9]+(?:[.,][0-9]+)?)\s*g\b/i);
-    const meters = clean.match(/(?:filament|filamento).*?(?:\[m\]|meters?|metri|m)\s*[=:]?\s*([0-9]+(?:[.,][0-9]+)?)/i)
-      ?? clean.match(/([0-9]+(?:[.,][0-9]+)?)\s*m\b/i);
-    const millimeters = clean.match(/(?:filament|filamento).*?(?:\[mm\]|millimeters?|mm)\s*[=:]?\s*([0-9]+(?:[.,][0-9]+)?)/i);
-
-    if (!metrics.filamentGrams && grams) {
-      metrics.filamentGrams = parseLocaleNumber(grams[1]);
-    }
-    if (!metrics.filamentMeters && meters && !clean.toLowerCase().includes("mm")) {
-      metrics.filamentMeters = parseLocaleNumber(meters[1]);
-      metrics.filamentMm = metrics.filamentMeters * 1000;
-    }
-    if (!metrics.filamentMm && millimeters) {
-      metrics.filamentMm = parseLocaleNumber(millimeters[1]);
-      metrics.filamentMeters = metrics.filamentMm / 1000;
-    }
-
-    const filamentType = clean.match(/filament(?:_type| type)?\s*[=:]\s*([A-Za-z0-9+\-\s]+)/i)?.[1];
-    if (!metrics.detectedMaterial && filamentType) {
-      metrics.detectedMaterial = filamentType.trim();
-    }
+  if (lower.includes("filament") || lower.includes("filamento") || lower.includes("extruder") || lower.includes("material")) {
+    updateFilamentMetadata(clean, metrics);
   }
 
   const printer = clean.match(/(?:printer_model|printer|generated by)\s*[=:]\s*([^;]+)/i)?.[1];
   if (!metrics.detectedPrinter && printer) {
     metrics.detectedPrinter = printer.trim();
   }
+}
+
+async function merge3mfArchiveMetadata(zip: JSZip, metrics: PrintMetrics): Promise<void> {
+  const metadataEntries = Object.values(zip.files).filter((entry) => !entry.dir && isLikely3mfMetadataEntry(entry.name));
+  for (const entry of metadataEntries.slice(0, 40)) {
+    try {
+      mergeSlicerTextMetadata(await entry.async("string"), metrics);
+    } catch {
+      // Binary or unsupported metadata entries are ignored; other entries may still contain the estimate.
+    }
+  }
+  normalizeFilamentMetrics(metrics);
+}
+
+function isLikely3mfMetadataEntry(name: string): boolean {
+  return /(^|\/)metadata\//i.test(name) || /\.(config|ini|txt|xml|json)$/i.test(name);
+}
+
+function mergeSlicerTextMetadata(text: string, metrics: PrintMetrics): void {
+  for (const line of text.split(/\r?\n/)) {
+    updateGcodeMetadata(line, metrics);
+  }
+
+  for (const match of text.matchAll(/(?:name|key)\s*=\s*["']([^"']+)["'][^>]*\bvalue\s*=\s*["']([^"']*)["']/gi)) {
+    updateGcodeMetadata(`${match[1]} = ${match[2]}`, metrics);
+  }
+
+  for (const match of text.matchAll(/<metadata[^>]*name\s*=\s*["']([^"']+)["'][^>]*>([^<]+)<\/metadata>/gi)) {
+    updateGcodeMetadata(`${match[1]} = ${match[2]}`, metrics);
+  }
+}
+
+function merge3mfModelMetadata(document: Document, metrics: PrintMetrics): void {
+  for (const metadata of elements(document, "metadata")) {
+    const name = metadata.getAttribute("name") ?? metadata.getAttribute("key") ?? metadata.getAttribute("type");
+    const value = metadata.getAttribute("value") ?? metadata.textContent;
+    if (name && value) {
+      updateGcodeMetadata(`${name} = ${value}`, metrics);
+    }
+  }
+}
+
+function updateFilamentMetadata(line: string, metrics: PrintMetrics): void {
+  const materialValues = parseFilamentTextValues(line, [
+    /filament(?:_|\s|-)?type/i,
+    /filament(?:_|\s|-)?settings(?:_|\s|-)?id/i,
+    /material(?:_|\s|-)?type/i,
+  ]);
+  if (materialValues.length) {
+    mergeFilamentTextList(metrics, "material", materialValues);
+  }
+
+  const colorValues = parseFilamentTextValues(line, [
+    /filament(?:_|\s|-)?colou?r/i,
+    /extruder(?:_|\s|-)?colou?r/i,
+  ]);
+  if (colorValues.length) {
+    mergeFilamentTextList(metrics, "color", colorValues);
+  }
+
+  const usage = parseFilamentUsageValues(line);
+  if (usage) {
+    mergeFilamentUsageValues(metrics, usage.unit, usage.values, usage.isTotal);
+  }
+}
+
+function parseFilamentTextValues(line: string, keyPatterns: RegExp[]): string[] {
+  const key = getMetadataKey(line);
+  const haystack = `${key} ${line}`;
+  if (!keyPatterns.some((pattern) => pattern.test(haystack))) {
+    return [];
+  }
+
+  const assigned = getAssignedValue(line);
+  if (!assigned || assigned === line) {
+    return [];
+  }
+  return parseTextList(assigned);
+}
+
+function parseFilamentUsageValues(line: string): { unit: "grams" | "meters" | "millimeters"; values: number[]; isTotal: boolean } | undefined {
+  const key = getMetadataKey(line).toLowerCase();
+  const lower = line.toLowerCase();
+  const context = `${key} ${lower}`;
+  if (!/(filament|filamento|used_filament|total_filament)/i.test(context)) {
+    return undefined;
+  }
+  if (/(filament|filamento)(?:_|\s|-)?(?:type|settings|colou?r)\b/i.test(context)) {
+    return undefined;
+  }
+
+  const assigned = getAssignedValue(line);
+  const assignedLower = assigned.toLowerCase();
+  const unit = detectFilamentUnit(context, assignedLower);
+  if (!unit) {
+    return undefined;
+  }
+
+  const values = parseNumberList(assigned);
+  return values.length ? { unit, values, isTotal: /\b(total|totale)\b/i.test(context) } : undefined;
+}
+
+function detectFilamentUnit(context: string, value: string): "grams" | "meters" | "millimeters" | undefined {
+  if (/\[mm\]|(?:^|[\s_-])mm(?:$|[\s_-])|millimeters?|millimetri|used_mm|length_mm|filament_mm/.test(context) || /[0-9][0-9.,]*\s*mm\b/.test(value)) {
+    return "millimeters";
+  }
+  if (/\[g\]|(?:^|[\s_-])g(?:$|[\s_-])|grams?|grammi|weight|used_g|filament_g|filament_weight|total_filament_used_g/.test(context) || /[0-9][0-9.,]*\s*g\b/.test(value)) {
+    return "grams";
+  }
+  if (/\[m\]|(?:^|[\s_-])m(?:$|[\s_-])|meters?|metri|used_m|filament_m/.test(context) || /[0-9][0-9.,]*\s*m\b/.test(value)) {
+    return "meters";
+  }
+  return undefined;
+}
+
+function mergeFilamentUsageValues(
+  metrics: PrintMetrics,
+  unit: "grams" | "meters" | "millimeters",
+  values: number[],
+  isTotal: boolean,
+): void {
+  const finiteValues = values.filter((value) => Number.isFinite(value) && value >= 0);
+  if (!finiteValues.length) {
+    return;
+  }
+
+  if (finiteValues.length > 1 && !isTotal) {
+    const filaments = ensureFilamentUsages(metrics, finiteValues.length);
+    finiteValues.forEach((value, index) => {
+      if (value > 0) {
+        setFilamentUsageField(filaments[index], unit, value);
+      }
+    });
+    setFilamentTotal(metrics, unit, finiteValues.reduce((total, value) => total + value, 0));
+    return;
+  }
+
+  const cleanValues = finiteValues.filter((value) => value > 0);
+  if (!cleanValues.length) {
+    return;
+  }
+  const total = cleanValues.reduce((sum, value) => sum + value, 0);
+  setFilamentTotal(metrics, unit, total);
+  if (!metrics.filaments?.length) {
+    setFilamentUsageField(ensureFilamentUsages(metrics, 1)[0], unit, total);
+  }
+}
+
+function mergeToolpathFilaments(metrics: PrintMetrics, filamentByToolMm: Map<string, number>): void {
+  const entries = Array.from(filamentByToolMm.entries()).filter(([, millimeters]) => millimeters > 0);
+  if (!entries.length) {
+    return;
+  }
+
+  if (entries.length > 1) {
+    const filaments = ensureFilamentUsages(metrics, entries.length);
+    entries.forEach(([tool, millimeters], index) => {
+      const filament = filaments[index];
+      if (!filament.material && !filament.color) {
+        filament.label = `Estrusore T${tool}`;
+      }
+      setFilamentUsageField(filament, "millimeters", millimeters);
+    });
+  }
+
+  setFilamentLength(metrics, entries.reduce((total, [, millimeters]) => total + millimeters, 0));
+}
+
+function mergeFilamentTextList(metrics: PrintMetrics, field: "material" | "color", values: string[]): void {
+  const cleanValues = values.map(cleanMetadataValue).filter(Boolean);
+  if (!cleanValues.length) {
+    return;
+  }
+
+  const existingCount = metrics.filaments?.length ?? 0;
+  const broadcastSingleMaterial = field === "material" && cleanValues.length === 1 && existingCount > 1;
+  const filaments = ensureFilamentUsages(metrics, broadcastSingleMaterial ? existingCount : cleanValues.length);
+  if (broadcastSingleMaterial) {
+    filaments.forEach((filament) => {
+      filament[field] = cleanValues[0];
+    });
+  } else {
+    cleanValues.forEach((value, index) => {
+      filaments[index][field] = value;
+    });
+  }
+
+  refreshFilamentLabels(metrics);
+}
+
+function ensureFilamentUsages(metrics: PrintMetrics, count: number): FilamentUsage[] {
+  const filaments = metrics.filaments ? [...metrics.filaments] : [];
+  for (let index = filaments.length; index < count; index += 1) {
+    filaments.push({
+      index,
+      label: `Filamento ${index + 1}`,
+    });
+  }
+  metrics.filaments = filaments;
+  return filaments;
+}
+
+function setFilamentUsageField(filament: FilamentUsage, unit: "grams" | "meters" | "millimeters", value: number): void {
+  if (unit === "grams") {
+    const rounded = roundMetric(value, 3);
+    filament.grams = Math.max(filament.grams ?? 0, rounded);
+    return;
+  }
+  if (unit === "meters") {
+    const rounded = roundMetric(value, 4);
+    filament.meters = Math.max(filament.meters ?? 0, rounded);
+    filament.millimeters = Math.max(filament.millimeters ?? 0, rounded * 1000);
+    return;
+  }
+  const rounded = roundMetric(value, 1);
+  filament.millimeters = Math.max(filament.millimeters ?? 0, rounded);
+  filament.meters = Math.max(filament.meters ?? 0, rounded / 1000);
+}
+
+function setFilamentTotal(metrics: PrintMetrics, unit: "grams" | "meters" | "millimeters", value: number): void {
+  if (unit === "grams") {
+    metrics.filamentGrams = Math.max(metrics.filamentGrams ?? 0, roundMetric(value, 3));
+    return;
+  }
+  if (unit === "meters") {
+    setFilamentLength(metrics, value * 1000);
+    return;
+  }
+  setFilamentLength(metrics, value);
+}
+
+function setFilamentLength(metrics: PrintMetrics, lengthMm: number): void {
+  const roundedMm = roundMetric(lengthMm, 1);
+  metrics.filamentMm = Math.max(metrics.filamentMm ?? 0, roundedMm);
+  metrics.filamentMeters = roundMetric(metrics.filamentMm / 1000, 4);
+}
+
+function normalizeFilamentMetrics(metrics: PrintMetrics): void {
+  const hasQuantifiedFilaments = (metrics.filaments ?? []).some(hasFilamentQuantity);
+  const filaments = (metrics.filaments ?? [])
+    .filter((filament) => hasFilamentData(filament) && (!hasQuantifiedFilaments || hasFilamentQuantity(filament)))
+    .map((filament, index) => ({
+      ...filament,
+      index,
+      label: makeFilamentLabel(filament, index),
+    }));
+
+  if (filaments.length) {
+    metrics.filaments = filaments;
+    const grams = sumFilamentField(filaments, "grams");
+    const millimeters = filaments.reduce((total, filament) => {
+      const lengthMm = filament.millimeters ?? (filament.meters ? filament.meters * 1000 : 0);
+      return total + (Number.isFinite(lengthMm) ? lengthMm : 0);
+    }, 0);
+    if (grams > 0) {
+      metrics.filamentGrams = Math.max(metrics.filamentGrams ?? 0, roundMetric(grams, 3));
+    }
+    if (millimeters > 0) {
+      setFilamentLength(metrics, millimeters);
+    }
+
+    const materials = uniqueValues(filaments.map((filament) => filament.material));
+    if (materials.length) {
+      metrics.detectedMaterial = materials.join(" + ");
+    }
+  }
+}
+
+function refreshFilamentLabels(metrics: PrintMetrics): void {
+  metrics.filaments = metrics.filaments?.map((filament, index) => ({
+    ...filament,
+    index,
+    label: makeFilamentLabel(filament, index),
+  }));
+}
+
+function hasFilamentData(filament: FilamentUsage): boolean {
+  return Boolean(
+    filament.material
+      || filament.color
+      || (Number.isFinite(filament.grams) && filament.grams)
+      || (Number.isFinite(filament.millimeters) && filament.millimeters)
+      || (Number.isFinite(filament.meters) && filament.meters),
+  );
+}
+
+function hasFilamentQuantity(filament: FilamentUsage): boolean {
+  return Boolean(
+    (Number.isFinite(filament.grams) && filament.grams)
+      || (Number.isFinite(filament.millimeters) && filament.millimeters)
+      || (Number.isFinite(filament.meters) && filament.meters),
+  );
+}
+
+function makeFilamentLabel(filament: FilamentUsage, index: number): string {
+  const parts = [filament.material, filament.color].map(cleanMetadataValue).filter(Boolean);
+  return parts.length ? parts.join(" ") : filament.label || `Filamento ${index + 1}`;
+}
+
+function sumFilamentField(filaments: FilamentUsage[], field: "grams"): number {
+  return filaments.reduce((total, filament) => {
+    const value = filament[field] ?? 0;
+    return total + (Number.isFinite(value) ? value : 0);
+  }, 0);
+}
+
+function uniqueValues(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.map(cleanMetadataValue).filter(Boolean)));
+}
+
+function parseTextList(value: string): string[] {
+  const normalized = value.trim().replace(/^\[|\]$/g, "");
+  return normalized
+    .split(/[;|,]/)
+    .map(cleanMetadataValue)
+    .filter(Boolean);
+}
+
+function parseNumberList(value: string): number[] {
+  const normalized = value.trim();
+  const explicitParts =
+    normalized.includes(";") || normalized.includes("|")
+      ? normalized.split(/[;|]/)
+      : normalized.includes(".") && normalized.includes(",")
+      ? normalized.split(",")
+      : /,\s+/.test(normalized)
+      ? normalized.split(/,\s+/)
+      : undefined;
+
+  if (explicitParts) {
+    return explicitParts
+      .map((part) => part.match(/-?[0-9]+(?:[.,][0-9]+)?/)?.[0])
+      .filter((part): part is string => Boolean(part))
+      .map(parseLocaleNumber)
+      .filter((number) => Number.isFinite(number));
+  }
+
+  return Array.from(value.matchAll(/-?[0-9]+(?:[.,][0-9]+)?/g))
+    .map((match) => parseLocaleNumber(match[0]))
+    .filter((number) => Number.isFinite(number));
+}
+
+function getMetadataKey(line: string): string {
+  const attributeKey = line.match(/\b(?:name|key)\s*=\s*["']([^"']+)["']/i)?.[1];
+  if (attributeKey) {
+    return attributeKey;
+  }
+
+  const normalized = line.replace(/^\s*;\s*/, "");
+  const separatorIndex = normalized.search(/[:=]/);
+  return separatorIndex >= 0 ? normalized.slice(0, separatorIndex).trim() : normalized.trim();
+}
+
+function getAssignedValue(line: string): string {
+  const attributeValue = line.match(/\bvalue\s*=\s*["']([^"']*)["']/i)?.[1];
+  if (attributeValue !== undefined) {
+    return attributeValue.trim();
+  }
+
+  const normalized = line.replace(/^\s*;\s*/, "");
+  const separatorIndex = normalized.search(/[:=]/);
+  return separatorIndex >= 0 ? normalized.slice(separatorIndex + 1).trim() : normalized.trim();
+}
+
+function cleanMetadataValue(value: string | undefined): string {
+  return (value ?? "")
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function hasPrintEstimate(metrics: PrintMetrics): boolean {
+  return Boolean(metrics.printTimeMinutes || metrics.filamentGrams || metrics.filamentMm || metrics.filamentMeters || metrics.filaments?.length);
+}
+
+function roundMetric(value: number, digits: number): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
 }
 
 function parseDurationToMinutes(value: string): number | undefined {
@@ -365,6 +767,32 @@ function parseGcodeParams(command: string): Partial<Record<"X" | "Y" | "Z" | "E"
     params[key] = Number(match[2]);
   }
   return params;
+}
+
+function extract3mfGeometry(document: Document): Extracted3mfGeometry {
+  const modelElement = firstElement(document, "model");
+  const unitScale = unitToMm(modelElement?.getAttribute("unit"));
+  const objects = parse3mfObjects(document, unitScale);
+  const buildItems = elements(document, "item").filter((item) => item.parentElement && tagMatches(item.parentElement, "build"));
+  const vertices: number[] = [];
+  const indices: number[] = [];
+  const bounds = createEmptyBounds();
+
+  if (buildItems.length) {
+    for (const item of buildItems) {
+      const objectId = item.getAttribute("objectid");
+      if (!objectId) {
+        continue;
+      }
+      appendObjectMesh(objectId, objects, [parseTransform(item.getAttribute("transform"))], vertices, indices, bounds);
+    }
+  } else {
+    for (const objectId of objects.keys()) {
+      appendObjectMesh(objectId, objects, [], vertices, indices, bounds);
+    }
+  }
+
+  return { vertices, indices, bounds };
 }
 
 function parse3mfObjects(document: Document, unitScale: number): Map<string, ObjectNode> {
@@ -510,12 +938,42 @@ function calculateMeshVolumeCm3(vertices: number[], indices: number[]): number {
 
 function mergeGcodeMetrics(target: PrintMetrics, source: PrintMetrics): void {
   target.printTimeMinutes = target.printTimeMinutes ?? source.printTimeMinutes;
-  target.filamentGrams = target.filamentGrams ?? source.filamentGrams;
-  target.filamentMeters = target.filamentMeters ?? source.filamentMeters;
-  target.filamentMm = target.filamentMm ?? source.filamentMm;
+  target.filamentGrams = Math.max(target.filamentGrams ?? 0, source.filamentGrams ?? 0) || undefined;
+  target.filamentMeters = Math.max(target.filamentMeters ?? 0, source.filamentMeters ?? 0) || undefined;
+  target.filamentMm = Math.max(target.filamentMm ?? 0, source.filamentMm ?? 0) || undefined;
+  target.filaments = mergeFilamentUsages(target.filaments, source.filaments);
   target.layerCount = target.layerCount ?? source.layerCount;
   target.detectedPrinter = target.detectedPrinter ?? source.detectedPrinter;
   target.detectedMaterial = target.detectedMaterial ?? source.detectedMaterial;
+  normalizeFilamentMetrics(target);
+}
+
+function mergeFilamentUsages(
+  targetFilaments: FilamentUsage[] | undefined,
+  sourceFilaments: FilamentUsage[] | undefined,
+): FilamentUsage[] | undefined {
+  if (!sourceFilaments?.length) {
+    return targetFilaments;
+  }
+  if (!targetFilaments?.length) {
+    return sourceFilaments;
+  }
+
+  const next = [...targetFilaments];
+  sourceFilaments.forEach((source, index) => {
+    const target = next[index] ?? { index, label: `Filamento ${index + 1}` };
+    next[index] = {
+      ...target,
+      label: source.label || target.label,
+      grams: Math.max(target.grams ?? 0, source.grams ?? 0) || target.grams,
+      meters: Math.max(target.meters ?? 0, source.meters ?? 0) || target.meters,
+      millimeters: Math.max(target.millimeters ?? 0, source.millimeters ?? 0) || target.millimeters,
+      material: target.material ?? source.material,
+      color: target.color ?? source.color,
+    };
+  });
+
+  return next;
 }
 
 function createBaseMetrics(fileName: string, fileSize: number, kind: PrintMetrics["kind"], warnings: string[]): PrintMetrics {
@@ -582,13 +1040,18 @@ function firstElement(document: Document, tag: string): Element | undefined {
 }
 
 function firstChildElement(element: Element, tag: string): Element | undefined {
-  return Array.from(element.children).find((child) => child.tagName.toLowerCase().endsWith(tag));
+  return Array.from(element.children).find((child) => tagMatches(child, tag));
 }
 
 function elements(root: Document | Element, tag: string): Element[] {
-  return Array.from(root.getElementsByTagName("*")).filter((element) =>
-    element.tagName.toLowerCase().endsWith(tag.toLowerCase()),
-  );
+  return Array.from(root.getElementsByTagName("*")).filter((element) => tagMatches(element, tag));
+}
+
+function tagMatches(element: Element, tag: string): boolean {
+  const expected = tag.toLowerCase();
+  const localName = (element.localName || "").toLowerCase();
+  const tagName = element.tagName.toLowerCase();
+  return localName === expected || tagName === expected || tagName.endsWith(`:${expected}`);
 }
 
 function parseLocaleNumber(value: string): number {

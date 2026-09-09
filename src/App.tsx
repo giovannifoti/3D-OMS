@@ -48,6 +48,7 @@ import { loadOrders, loadProducts, makeOrderId, makeQuoteNumber, saveOrders, sav
 import type {
   Customer,
   DiscountMode,
+  FilamentUsage,
   FrequentProduct,
   Order,
   OrderStatus,
@@ -251,6 +252,8 @@ function App() {
           manualMinutes: item.manualMinutes,
           filamentGrams: item.filamentGrams,
         }));
+      } else if (newItems.some((item) => item.color === "Colore")) {
+        patchPricing({ color: "Colore" });
       }
     } finally {
       setIsParsing(false);
@@ -294,6 +297,7 @@ function App() {
         name: previous.name.trim() ? previous.name : stripFileExtension(file.name),
         defaultMinutes: suggested.manualMinutes,
         defaultGrams: suggested.filamentGrams,
+        color: suggested.color,
       }));
     } finally {
       setIsParsingProduct(false);
@@ -533,6 +537,7 @@ function App() {
       boundingBox: productSource.metrics.boundingBox,
       layerCount: productSource.metrics.layerCount,
       volumeCm3: productSource.metrics.volumeCm3,
+      filaments: productSource.metrics.filaments,
       warnings: productSource.metrics.warnings,
       notes: productDraft.notes.trim(),
       defaultQuantity: Math.max(1, productDraft.defaultQuantity),
@@ -724,6 +729,7 @@ function App() {
                           <TextField label="Prodotto" value={row.item.name} onChange={(name) => updateQuoteItem(row.item.id, { name })} />
                           <small>
                             {row.item.fileName} · {row.item.kind.toUpperCase()}
+                            {formatFilamentBadge(row.item.metrics.filaments)}
                           </small>
                         </div>
                         <NumberField
@@ -1135,6 +1141,9 @@ function App() {
                     <InfoRow label="Tipo" value={productSource.metrics.kind.toUpperCase()} />
                     <InfoRow label="Tempo" value={`${formatNumber(productDraft.defaultMinutes)} min`} />
                     <InfoRow label="Filamento" value={`${formatNumber(productDraft.defaultGrams)} g`} />
+                    {productSource.metrics.filaments && productSource.metrics.filaments.length > 1 && (
+                      <InfoRow label="Filamenti" value={formatFilamentCount(productSource.metrics.filaments)} />
+                    )}
                     {productSource.metrics.boundingBox && (
                       <InfoRow
                         label="Ingombro"
@@ -1287,6 +1296,12 @@ function App() {
                         <Weight size={15} />
                         {formatNumber(product.defaultGrams)} g
                       </span>
+                      {product.filaments && product.filaments.length > 1 && (
+                        <span>
+                          <FileArchive size={15} />
+                          {formatFilamentCount(product.filaments)}
+                        </span>
+                      )}
                       <span>
                         <Palette size={15} />
                         {product.color}
@@ -1373,6 +1388,14 @@ function InfoRow({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function formatFilamentCount(filaments: FilamentUsage[]): string {
+  return `${filaments.length} filamenti`;
+}
+
+function formatFilamentBadge(filaments: FilamentUsage[] | undefined): string {
+  return filaments && filaments.length > 1 ? ` · ${formatFilamentCount(filaments)}` : "";
 }
 
 function ToggleOption({
@@ -1523,12 +1546,14 @@ function makeManualMetrics(itemName: string, pricing: PricingInputs): PrintMetri
 function makeQuoteMetrics(itemName: string, items: QuoteItem[]): PrintMetrics {
   const firstKind = items[0]?.kind ?? "unknown";
   const sameKind = items.every((item) => item.kind === firstKind);
+  const filaments = mergeQuoteFilaments(items);
   return {
     fileName: itemName.trim() || (items.length === 1 ? items[0].name : `${items.length} prodotti`),
     fileSize: items.reduce((total, item) => total + item.metrics.fileSize, 0),
     kind: sameKind ? firstKind : "unknown",
     printTimeMinutes: items.reduce((total, item) => total + item.manualMinutes * item.quantity, 0),
     filamentGrams: items.reduce((total, item) => total + item.filamentGrams * item.quantity, 0),
+    filaments,
     warnings: Array.from(new Set(items.flatMap((item) => item.metrics.warnings))),
   };
 }
@@ -1543,6 +1568,8 @@ function makeQuoteItem(parsedFile: ParsedFile, fileName: string, pricing: Pricin
     quantity: 1,
     manualMinutes: suggested.manualMinutes,
     filamentGrams: suggested.filamentGrams,
+    color: suggested.color,
+    finish: suggested.finish,
     metrics: {
       ...parsedFile.metrics,
       printTimeMinutes: suggested.manualMinutes,
@@ -1572,9 +1599,32 @@ function makeProductQuoteItem(product: FrequentProduct): QuoteItem {
       boundingBox: product.boundingBox,
       layerCount: product.layerCount,
       volumeCm3: product.volumeCm3,
+      filaments: product.filaments,
       warnings: product.warnings ?? [],
     },
   };
+}
+
+function mergeQuoteFilaments(items: QuoteItem[]): FilamentUsage[] | undefined {
+  const sourceFilaments = items.flatMap((item) => {
+    const filaments = item.metrics.filaments ?? [];
+    return filaments.map((filament) => ({
+      ...filament,
+      grams: filament.grams !== undefined ? filament.grams * item.quantity : undefined,
+      meters: filament.meters !== undefined ? filament.meters * item.quantity : undefined,
+      millimeters: filament.millimeters !== undefined ? filament.millimeters * item.quantity : undefined,
+    }));
+  });
+
+  if (!sourceFilaments.length) {
+    return undefined;
+  }
+
+  return sourceFilaments.map((filament, index) => ({
+    ...filament,
+    index,
+    label: filament.label || `Filamento ${index + 1}`,
+  }));
 }
 
 function combinePriceBreakdowns(breakdowns: PriceBreakdown[]): PriceBreakdown {
