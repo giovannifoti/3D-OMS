@@ -149,6 +149,13 @@ export type Customer = {
   phone: string;
 };
 
+export type PaymentDetails = {
+  holder: string;
+  iban: string;
+  bank: string;
+  depositPercent: number;
+};
+
 export type OrderStatus =
   | "Bozza"
   | "Preventivo inviato"

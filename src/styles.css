@@ -636,6 +636,21 @@ button:disabled {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.compact-form {
+  grid-template-columns: 1fr;
+}
+
+.payment-settings-panel .panel-title {
+  margin-bottom: 12px;
+}
+
+.payment-settings-panel .info-row {
+  background: #f7faff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
 .wide-field {
   grid-column: 1 / -1;
 }

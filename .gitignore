@@ -4,3 +4,12 @@ dist
 .npm-cache
 *.local
 *.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.pdf
+*.gcode
+*.gco
+*.gc
+*.3mf
+private-data/

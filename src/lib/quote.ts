@@ -1,6 +1,6 @@
 import { jsPDF } from "jspdf";
 import { autoTable } from "jspdf-autotable";
-import type { Customer, DiscountMode, Order, PriceBreakdown, PricingInputs, PrintMetrics, QuoteItem, ShippingMethod } from "../types";
+import type { Customer, DiscountMode, Order, PaymentDetails, PriceBreakdown, PricingInputs, PrintMetrics, QuoteItem, ShippingMethod } from "../types";
 import {
   DEFAULT_PRICING,
   PRINTER_PROFILE,
@@ -9,6 +9,7 @@ import {
   getShippingOption,
   normalizeManualUnitPrice,
 } from "./pricing";
+import { loadPaymentDetails } from "./storage";
 
 type QuoteLinePayload = {
   item: QuoteItem;
@@ -29,6 +30,7 @@ type QuotePayload = {
   discountAmount: number;
   items?: QuoteLinePayload[];
   notes: string;
+  paymentDetails?: PaymentDetails;
 };
 
 type PdfLine = {
@@ -58,6 +60,7 @@ type PdfPayload = {
     amount: number;
   };
   notes: string;
+  paymentDetails?: PaymentDetails;
 };
 
 type PdfAssets = {
@@ -77,13 +80,6 @@ const COLORS = {
 };
 
 const BRAND_MARK_SRC = "/brand/logo-mark.png";
-
-const PAYMENT_DETAILS = {
-  holder: "Intestatario non configurato",
-  iban: "IBAN non configurato",
-  bank: "Banca non configurata",
-  depositPercent: 25,
-} as const;
 
 export async function openQuote(payload: QuotePayload): Promise<void> {
   const document = createQuotePdfDocument(payload, await loadPdfAssets());
@@ -130,6 +126,7 @@ export function createQuotePdfDocument(payload: QuotePayload, assets: PdfAssets 
     },
     discount: getQuoteDiscount(payload.discountMode, payload.discountValue, payload.discountAmount),
     notes: payload.notes,
+    paymentDetails: payload.paymentDetails,
   }, assets);
 }
 
@@ -297,7 +294,8 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload, assets: PdfAssets
   const pageWidth = document.internal.pageSize.getWidth();
   const margin = 18;
   const contentWidth = pageWidth - margin * 2;
-  const depositAmount = Math.ceil((payload.grossPrice * PAYMENT_DETAILS.depositPercent) / 100);
+  const paymentDetails = payload.paymentDetails ?? loadPaymentDetails();
+  const depositAmount = Math.ceil((payload.grossPrice * paymentDetails.depositPercent) / 100);
 
   drawPdfHeader(document, {
     assets,
@@ -322,7 +320,7 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload, assets: PdfAssets
   document.setFont("helvetica", "normal");
   document.setFontSize(9);
   const installmentLines = document.splitTextToSize(
-    `1. Acconto del ${PAYMENT_DETAILS.depositPercent}% entro 48 ore dall'invio del preventivo e saldo rimanente prima della spedizione.`,
+    `1. Acconto del ${paymentDetails.depositPercent}% entro 48 ore dall'invio del preventivo e saldo rimanente prima della spedizione.`,
     contentWidth - 12,
   );
   document.text(installmentLines, margin + 6, depositY + 20, { lineHeightFactor: 1.25 });
@@ -335,7 +333,7 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload, assets: PdfAssets
   document.setTextColor(...COLORS.blue);
   document.setFont("helvetica", "bold");
   document.setFontSize(8);
-  document.text(`ACCONTO ${PAYMENT_DETAILS.depositPercent}%`, margin + 6, depositY + 57);
+  document.text(`ACCONTO ${paymentDetails.depositPercent}%`, margin + 6, depositY + 57);
   document.setFontSize(17);
   document.setTextColor(...COLORS.navy);
   document.text(formatPdfCurrency(depositAmount), margin + 6, depositY + 69);
@@ -363,13 +361,13 @@ function drawPaymentPage(document: jsPDF, payload: PdfPayload, assets: PdfAssets
   document.setTextColor(...COLORS.text);
   document.setFont("helvetica", "normal");
   document.setFontSize(11);
-  document.text(PAYMENT_DETAILS.holder, valueX, firstRowY);
+  document.text(cleanPdfText(paymentDetails.holder), valueX, firstRowY);
   document.setFont("courier", "bold");
   document.setFontSize(10.5);
-  document.text(PAYMENT_DETAILS.iban, valueX, firstRowY + 17);
+  document.text(cleanPdfText(paymentDetails.iban), valueX, firstRowY + 17);
   document.setFont("helvetica", "normal");
   document.setFontSize(11);
-  document.text(PAYMENT_DETAILS.bank, valueX, firstRowY + 34);
+  document.text(cleanPdfText(paymentDetails.bank), valueX, firstRowY + 34);
 
 }
 

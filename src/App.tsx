@@ -44,7 +44,7 @@ import {
   normalizeManualUnitPrice,
   suggestPricingFromMetrics,
 } from "./lib/pricing";
-import { loadOrders, loadProducts, makeOrderId, makeQuoteNumber, saveOrders, saveProducts } from "./lib/storage";
+import { loadOrders, loadPaymentDetails, loadProducts, makeOrderId, makeQuoteNumber, saveOrders, savePaymentDetails, saveProducts } from "./lib/storage";
 import type {
   Customer,
   DiscountMode,
@@ -53,6 +53,7 @@ import type {
   Order,
   OrderStatus,
   ParsedFile,
+  PaymentDetails,
   PriceBreakdown,
   PricingInputs,
   PrintMetrics,
@@ -98,6 +99,7 @@ function App() {
   const [notes, setNotes] = useState(DEFAULT_NOTES);
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<FrequentProduct[]>([]);
+  const [paymentDetails, setPaymentDetails] = useState<PaymentDetails>(() => loadPaymentDetails());
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [productSearch, setProductSearch] = useState("");
   const [productDraft, setProductDraft] = useState(EMPTY_PRODUCT);
@@ -115,6 +117,7 @@ function App() {
   useEffect(() => {
     setOrders(loadOrders());
     setProducts(loadProducts());
+    setPaymentDetails(loadPaymentDetails());
   }, []);
 
   useEffect(() => {
@@ -133,6 +136,10 @@ function App() {
   useEffect(() => {
     saveProducts(products);
   }, [products]);
+
+  useEffect(() => {
+    savePaymentDetails(paymentDetails);
+  }, [paymentDetails]);
 
   const pricedQuote = useMemo(() => {
     const rows = quoteItems.map((item) => {
@@ -513,6 +520,7 @@ function App() {
       discountAmount: pricedQuote.discountAmount,
       items: pricedQuote.rows,
       notes,
+      paymentDetails,
     });
   }
 
@@ -984,6 +992,28 @@ function App() {
                     })}
                   </div>
                 </div>
+              </div>
+            </section>
+
+            <section className="panel payment-settings-panel">
+              <PanelTitle icon={<Lock size={18} />} title="Dati pagamento PDF" />
+              <div className="form-grid compact-form">
+                <TextField
+                  label="Intestatario"
+                  value={paymentDetails.holder}
+                  onChange={(holder) => setPaymentDetails((previous) => ({ ...previous, holder }))}
+                />
+                <TextField
+                  label="IBAN"
+                  value={paymentDetails.iban}
+                  onChange={(iban) => setPaymentDetails((previous) => ({ ...previous, iban }))}
+                />
+                <TextField
+                  label="Banca"
+                  value={paymentDetails.bank}
+                  onChange={(bank) => setPaymentDetails((previous) => ({ ...previous, bank }))}
+                />
+                <InfoRow label="Acconto" value={`${paymentDetails.depositPercent}% arrotondato per eccesso`} />
               </div>
             </section>
 
